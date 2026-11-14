@@ -10,8 +10,10 @@ import {
   ZoomOut,
   Loader2,
   Maximize2,
+  ExternalLink,
+  HardDrive,
 } from 'lucide-react';
-import { getPdfPage, setPdfPage, streamUrl } from '../api';
+import { apiFetch, formatBytes, getPdfPage, setPdfPage, streamUrl } from '../api';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -23,6 +25,7 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
   const touchRef = useRef({ x: 0, y: 0 });
 
   const [loading, setLoading] = useState(true);
+  const [loadStatus, setLoadStatus] = useState('Streaming PDF...');
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState('');
   const [numPages, setNumPages] = useState(0);
@@ -37,19 +40,21 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
     let cancelled = false;
     setLoading(true);
     setError('');
+    setLoadStatus('Streaming PDF via range chunks...');
 
-    const loadingTask = pdfjsLib.getDocument({
-      url: pdfUrl,
-      withCredentials: true,
-      rangeChunkSize: 131072, // 128 KB chunks for instant Page 1
-      disableAutoFetch: true,
-      disableStream: false,
-      cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/cmaps/',
-      cMapPacked: true,
-    });
-
-    loadingTask.promise
-      .then((doc) => {
+    const loadWithFallback = async () => {
+      // 1. Try fast byte-range streaming first
+      try {
+        const rangeTask = pdfjsLib.getDocument({
+          url: pdfUrl,
+          withCredentials: true,
+          rangeChunkSize: 131072,
+          disableAutoFetch: true,
+          disableStream: false,
+          cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/cmaps/',
+          cMapPacked: true,
+        });
+        const doc = await rangeTask.promise;
         if (cancelled) {
           doc.destroy();
           return;
@@ -60,17 +65,79 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         setPageNum(saved);
         setPageInput(String(saved));
         setLoading(false);
-      })
-      .catch((err) => {
+        return;
+      } catch {
+        // Fall through to full fetch (BeyondDrive style)
+      }
+
+      if (cancelled) return;
+      setLoadStatus('Loading full PDF...');
+
+      try {
+        const res = await fetch(pdfUrl, { credentials: 'include' });
+        if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
+
+        const total = Number(res.headers.get('Content-Length') || item.size || 0);
+        const reader = res.body?.getReader();
+        let buffer;
+
+        if (reader) {
+          const chunks = [];
+          let received = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (cancelled) {
+              reader.cancel();
+              return;
+            }
+            chunks.push(value);
+            received += value.length;
+            if (total > 0) {
+              const pct = Math.min(100, Math.round((received / total) * 100));
+              setLoadStatus(`Loading PDF... ${pct}% (${formatBytes(received)})`);
+            }
+          }
+          const merged = new Uint8Array(received);
+          let offset = 0;
+          for (const c of chunks) {
+            merged.set(c, offset);
+            offset += c.length;
+          }
+          buffer = merged.buffer;
+        } else {
+          buffer = await res.arrayBuffer();
+        }
+
+        if (cancelled) return;
+        const dataTask = pdfjsLib.getDocument({
+          data: buffer,
+          cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/cmaps/',
+          cMapPacked: true,
+        });
+        const doc = await dataTask.promise;
+        if (cancelled) {
+          doc.destroy();
+          return;
+        }
+        pdfDocRef.current = doc;
+        setNumPages(doc.numPages);
+        const saved = Math.max(1, Math.min(doc.numPages, getPdfPage(item.chatId, item.id)));
+        setPageNum(saved);
+        setPageInput(String(saved));
+        setLoading(false);
+      } catch (err) {
         if (!cancelled) {
           setError(err.message || 'Failed to load PDF');
           setLoading(false);
         }
-      });
+      }
+    };
+
+    loadWithFallback();
 
     return () => {
       cancelled = true;
-      loadingTask.destroy();
       if (pdfDocRef.current) {
         pdfDocRef.current.destroy();
         pdfDocRef.current = null;
@@ -142,6 +209,20 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [numPages]);
+
+  const openExternal = async (target) => {
+    try {
+      const data = await apiFetch(`/api/stream-link/${encodeURIComponent(item.chatId)}/${item.id}?mode=telegram_hq`);
+      if (target === 'chrome') {
+        window.open(data.directUrl, '_blank', 'noopener');
+      } else if (target === 'drive') {
+        const driveUrl = `https://drive.google.com/viewerng/viewer?embedded=true&url=${encodeURIComponent(data.directUrl)}`;
+        window.open(driveUrl, '_blank', 'noopener');
+      }
+    } catch {
+      window.open(pdfUrl, '_blank', 'noopener');
+    }
+  };
 
   if (!item) return null;
 
@@ -219,7 +300,7 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
           </div>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
           <button
             type="button"
             className="btn"
@@ -240,6 +321,26 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
           <button type="button" className="btn" style={{ padding: '6px 8px' }} onClick={() => setScale(1.0)} title="Fit Width">
             <Maximize2 size={14} />
           </button>
+
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: '6px 10px', fontSize: 12 }}
+            onClick={() => openExternal('chrome')}
+            title="Open in Chrome"
+          >
+            <ExternalLink size={13} /> Chrome
+          </button>
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: '6px 10px', fontSize: 12 }}
+            onClick={() => openExternal('drive')}
+            title="Open in Google Drive Viewer"
+          >
+            <HardDrive size={13} /> Drive
+          </button>
+
           <a
             href={streamUrl(item.chatId, item.id, 'telegram_hq', true)}
             className="btn btn-primary"
@@ -281,14 +382,22 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         {loading ? (
           <div style={{ marginTop: 100, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: '#94a3b8' }}>
             <Loader2 size={32} className="spin" color="#00bfd8" />
-            <span>Streaming PDF page via range chunks...</span>
+            <span>{loadStatus}</span>
           </div>
         ) : error ? (
           <div style={{ marginTop: 80, textAlign: 'center', color: '#fca5a5', maxWidth: 460 }}>
             <p>{error}</p>
-            <a href={streamUrl(item.chatId, item.id, 'telegram_hq', true)} className="btn btn-primary" style={{ textDecoration: 'none' }}>
-              Download PDF instead
-            </a>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button type="button" className="btn" onClick={() => openExternal('chrome')}>
+                <ExternalLink size={14} /> Open in Chrome
+              </button>
+              <button type="button" className="btn" onClick={() => openExternal('drive')}>
+                <HardDrive size={14} /> Open in Drive
+              </button>
+              <a href={streamUrl(item.chatId, item.id, 'telegram_hq', true)} className="btn btn-primary" style={{ textDecoration: 'none' }}>
+                Download PDF
+              </a>
+            </div>
           </div>
         ) : (
           <div style={{ position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.65)' }}>
