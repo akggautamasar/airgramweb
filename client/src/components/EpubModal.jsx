@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import ePub from 'epubjs';
+import JSZip from 'jszip';
 import {
   X,
   Download,
@@ -13,33 +13,45 @@ import {
   Minus,
   Plus,
 } from 'lucide-react';
-import { formatBytes, getEpubCfi, setEpubCfi, streamUrl } from '../api';
+import { formatBytes, getPdfPage, setPdfPage, streamUrl } from '../api';
 
 const READER_THEMES = {
-  dark: { bg: '#0b101d', fg: '#e2e8f0', label: 'Dark' },
-  sepia: { bg: '#f4ecd8', fg: '#3b2f1e', label: 'Sepia' },
-  light: { bg: '#ffffff', fg: '#0f172a', label: 'Light' },
+  dark: { outer: '#0a0a0a', card: '#141720', fg: '#e2e8f0', heading: '#ffffff', link: '#38bdf8', label: 'Dark' },
+  sepia: { outer: '#1c1813', card: '#f4ecd8', fg: '#2f2416', heading: '#1a1209', link: '#1d4ed8', label: 'Sepia' },
+  light: { outer: '#e2e8f0', card: '#faf9f7', fg: '#111827', heading: '#0a0a0a', link: '#1d4ed8', label: 'Light' },
 };
 
+function sanitizeCSS(css) {
+  return css
+    .replace(/@font-face\s*\{[^}]*\}/gi, '')
+    .replace(/(body|html|\*)\s*\{[^}]*(background(-color)?:\s*(#[0-9a-f]{3,6}|rgb[^)]+\)|black|dark|white|#fff)[^}]*)\}/gi, '')
+    .replace(/color\s*:\s*(white|#fff|#ffffff|rgba?\([^)]*255[^)]*\))/gi, '');
+}
+
 export default function EpubModal({ item, mode = 'fast_web', onClose }) {
-  const viewerRef = useRef(null);
-  const bookRef = useRef(null);
-  const renditionRef = useRef(null);
+  const scrollRef = useRef(null);
+  const zipRef = useRef(null);
 
   const [loading, setLoading] = useState(true);
+  const [rendering, setRendering] = useState(false);
   const [progress, setProgress] = useState({ loaded: 0, total: item?.size || 0 });
   const [error, setError] = useState('');
-  const [toc, setToc] = useState([]);
+  const [spine, setSpine] = useState([]); // [{ path, title }]
+  const [chapterIdx, setChapterIdx] = useState(0);
+  const [chapterHtml, setChapterHtml] = useState('');
   const [tocOpen, setTocOpen] = useState(false);
-  const [readerTheme, setReaderTheme] = useState('dark');
-  const [fontSize, setFontSize] = useState(110);
-  const [chapterLabel, setChapterLabel] = useState('');
+  const [readerTheme, setReaderTheme] = useState('light');
+  const [fontSize, setFontSize] = useState(17);
+
+  // Remember chapter using pdfPage storage helper keyed with epub prefix
+  const epubStorageId = item ? `epub_${item.id}` : '';
 
   useEffect(() => {
     if (!item) return;
     let cancelled = false;
     setLoading(true);
     setError('');
+    setChapterHtml('');
 
     const url = streamUrl(item.chatId, item.id, mode, false);
 
@@ -77,50 +89,46 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
           buffer = await res.arrayBuffer();
         }
 
-        if (cancelled || !viewerRef.current) return;
+        if (cancelled) return;
 
-        const book = ePub(buffer);
-        bookRef.current = book;
+        const zip = await JSZip.loadAsync(buffer);
+        zipRef.current = zip;
 
-        const rendition = book.renderTo(viewerRef.current, {
-          width: '100%',
-          height: '100%',
-          spread: 'none',
-          flow: 'paginated',
-        });
-        renditionRef.current = rendition;
+        const parser = new DOMParser();
+        const contFile = zip.file('META-INF/container.xml');
+        if (!contFile) throw new Error('Invalid EPUB: missing container.xml');
+        const contXml = await contFile.async('string');
+        const contDoc = parser.parseFromString(contXml, 'text/xml');
+        const opfPath = contDoc.querySelector('rootfile')?.getAttribute('full-path');
+        if (!opfPath) throw new Error('Invalid EPUB: missing OPF rootfile');
 
-        Object.entries(READER_THEMES).forEach(([k, v]) => {
-          rendition.themes.register(k, {
-            body: {
-              background: `${v.bg} !important`,
-              color: `${v.fg} !important`,
-              'font-family': 'Inter, Georgia, serif !important',
-              'line-height': '1.65 !important',
-              padding: '12px 18px !important',
-            },
-            'a, a:link, a:visited': { color: '#38bdf8 !important' },
-          });
+        const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+        const opfXml = await zip.file(opfPath).async('string');
+        const opfDoc = parser.parseFromString(opfXml, 'text/xml');
+
+        const manifest = {};
+        opfDoc.querySelectorAll('manifest item').forEach((el) => {
+          manifest[el.getAttribute('id')] = el.getAttribute('href');
         });
 
-        rendition.themes.select(readerTheme);
-        rendition.themes.fontSize(`${fontSize}%`);
-
-        const savedCfi = getEpubCfi(item.chatId, item.id);
-        await rendition.display(savedCfi || undefined);
-
-        const nav = await book.loaded.navigation;
-        if (!cancelled && nav?.toc) {
-          setToc(nav.toc);
-        }
-
-        rendition.on('relocated', (loc) => {
-          if (loc?.start?.cfi) {
-            setEpubCfi(item.chatId, item.id, loc.start.cfi);
+        const spineList = [];
+        opfDoc.querySelectorAll('spine itemref').forEach((ref, idx) => {
+          const href = manifest[ref.getAttribute('idref')];
+          if (href) {
+            const fullPath = opfDir + href.split('#')[0];
+            const cleanName = href.split('/').pop().replace(/\.(x?html?|xml)$/i, '');
+            spineList.push({ path: fullPath, title: cleanName || `Chapter ${idx + 1}` });
           }
         });
 
-        if (!cancelled) setLoading(false);
+        if (spineList.length === 0) throw new Error('No readable chapters found in EPUB');
+
+        if (!cancelled) {
+          setSpine(spineList);
+          const savedIdx = Math.max(0, Math.min(spineList.length - 1, (getPdfPage(item.chatId, epubStorageId) || 1) - 1));
+          setChapterIdx(savedIdx);
+          setLoading(false);
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err.message || 'Could not open EPUB');
@@ -131,39 +139,93 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
 
     return () => {
       cancelled = true;
-      try {
-        renditionRef.current?.destroy();
-        bookRef.current?.destroy();
-      } catch {}
     };
   }, [item?.chatId, item?.id]);
 
+  // Render current chapter into clean HTML (BeyondDrive style: no broken iframe)
   useEffect(() => {
-    if (renditionRef.current) {
-      renditionRef.current.themes.select(readerTheme);
-    }
-  }, [readerTheme]);
+    const zip = zipRef.current;
+    if (!zip || spine.length === 0 || loading) return;
 
-  useEffect(() => {
-    if (renditionRef.current) {
-      renditionRef.current.themes.fontSize(`${fontSize}%`);
-    }
-  }, [fontSize]);
+    let cancelled = false;
+    setRendering(true);
+    setPdfPage(item.chatId, epubStorageId, chapterIdx + 1);
+
+    (async () => {
+      try {
+        const chapterPath = spine[chapterIdx].path;
+        const file = zip.file(chapterPath) || zip.file(decodeURIComponent(chapterPath));
+        if (!file) throw new Error('Chapter file not found in EPUB');
+
+        let html = await file.async('string');
+        const dir = chapterPath.includes('/') ? chapterPath.slice(0, chapterPath.lastIndexOf('/') + 1) : '';
+
+        // Inline images as base64 in parallel
+        const imgMatches = [...html.matchAll(/src=["']([^"'#?]+)["']/g)];
+        await Promise.all(
+          imgMatches
+            .filter((m) => !m[1].startsWith('data:') && !m[1].startsWith('http'))
+            .map(async (m) => {
+              const rel = m[1].replace(/^\.\//, '');
+              const candidates = [dir + rel, rel];
+              let imgFile = null;
+              for (const c of candidates) {
+                imgFile = zip.file(c) || zip.file(decodeURIComponent(c));
+                if (imgFile) break;
+              }
+              if (!imgFile) return;
+              const b64 = await imgFile.async('base64');
+              const mt = /\.png$/i.test(rel)
+                ? 'image/png'
+                : /\.gif$/i.test(rel)
+                ? 'image/gif'
+                : /\.svg$/i.test(rel)
+                ? 'image/svg+xml'
+                : 'image/jpeg';
+              html = html.replace(m[0], `src="data:${mt};base64,${b64}"`);
+            })
+        );
+
+        const parser = new DOMParser();
+        const parsed = parser.parseFromString(html, 'text/html');
+        parsed.querySelectorAll('link[rel="stylesheet"], script').forEach((el) => el.remove());
+        parsed.querySelectorAll('style').forEach((el) => {
+          el.textContent = sanitizeCSS(el.textContent || '');
+        });
+
+        const bodyHtml = parsed.body ? parsed.body.innerHTML : html;
+        if (!cancelled) {
+          setChapterHtml(bodyHtml);
+          setRendering(false);
+          if (scrollRef.current) scrollRef.current.scrollTop = 0;
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || 'Error rendering chapter');
+          setRendering(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [chapterIdx, spine, loading]);
 
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'ArrowRight') renditionRef.current?.next();
-      else if (e.key === 'ArrowLeft') renditionRef.current?.prev();
+      if (e.key === 'ArrowRight') setChapterIdx((i) => Math.min(spine.length - 1, i + 1));
+      else if (e.key === 'ArrowLeft') setChapterIdx((i) => Math.max(0, i - 1));
       else if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [spine.length]);
 
   if (!item) return null;
 
   const pct = progress.total > 0 ? Math.min(100, Math.round((progress.loaded / progress.total) * 100)) : 0;
-  const activeTheme = READER_THEMES[readerTheme];
+  const theme = READER_THEMES[readerTheme];
 
   return (
     <div
@@ -171,8 +233,7 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
         position: 'fixed',
         inset: 0,
         zIndex: 80,
-        background: activeTheme.bg,
-        color: activeTheme.fg,
+        background: theme.outer,
         display: 'flex',
         flexDirection: 'column',
       }}
@@ -180,33 +241,33 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
       {/* Header */}
       <div
         style={{
-          padding: '10px 16px',
+          padding: '10px 14px',
           borderBottom: '1px solid var(--border)',
           background: 'var(--bg-elevated)',
           color: 'var(--text)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: 10,
+          gap: 8,
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
           <button type="button" className="btn" style={{ padding: '6px 9px' }} onClick={() => setTocOpen((o) => !o)} title="Chapters">
             <List size={16} />
           </button>
           <span className="badge">EPUB</span>
-          <div style={{ fontWeight: 700, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {chapterLabel || item.fileName}
+          <div style={{ fontWeight: 700, fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {item.fileName}
           </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <button type="button" className="btn" style={{ padding: '6px 9px' }} onClick={() => setFontSize((f) => Math.max(80, f - 10))} title="Smaller text">
+          <button type="button" className="btn" style={{ padding: '6px 8px' }} onClick={() => setFontSize((f) => Math.max(13, f - 1))}>
             <Minus size={14} />
           </button>
-          <span style={{ fontSize: 12, minWidth: 38, textAlign: 'center' }}>{fontSize}%</span>
-          <button type="button" className="btn" style={{ padding: '6px 9px' }} onClick={() => setFontSize((f) => Math.min(180, f + 10))} title="Larger text">
+          <span style={{ fontSize: 12, minWidth: 34, textAlign: 'center' }}>{fontSize}px</span>
+          <button type="button" className="btn" style={{ padding: '6px 8px' }} onClick={() => setFontSize((f) => Math.min(26, f + 1))}>
             <Plus size={14} />
           </button>
 
@@ -214,16 +275,16 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
             type="button"
             className="btn"
             style={{ padding: '6px 10px', fontSize: 12 }}
-            onClick={() => setReaderTheme((t) => (t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark'))}
+            onClick={() => setReaderTheme((t) => (t === 'light' ? 'sepia' : t === 'sepia' ? 'dark' : 'light'))}
           >
             {readerTheme === 'dark' ? <Moon size={14} /> : readerTheme === 'sepia' ? <BookOpen size={14} /> : <Sun size={14} />}
-            <span>{activeTheme.label}</span>
+            <span>{theme.label}</span>
           </button>
 
           <a
             href={streamUrl(item.chatId, item.id, 'telegram_hq', true)}
             className="btn btn-primary"
-            style={{ padding: '6px 12px', fontSize: 12, textDecoration: 'none' }}
+            style={{ padding: '6px 11px', fontSize: 12, textDecoration: 'none' }}
           >
             <Download size={14} />
           </a>
@@ -233,14 +294,13 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
         </div>
       </div>
 
-      {/* Body */}
+      {/* Main Reader Area */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', overflow: 'hidden' }}>
-        {/* TOC Drawer */}
         {tocOpen && (
           <div
             style={{
-              width: 280,
-              maxWidth: '80vw',
+              width: 260,
+              maxWidth: '78vw',
               borderRight: '1px solid var(--border)',
               background: 'var(--bg-elevated)',
               color: 'var(--text)',
@@ -249,53 +309,47 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
               zIndex: 5,
             }}
           >
-            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Table of Contents</div>
-            {toc.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>No chapters listed</div>
-            ) : (
-              toc.map((ch, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  className="btn btn-ghost"
-                  style={{
-                    width: '100%',
-                    justifyContent: 'flex-start',
-                    textAlign: 'left',
-                    padding: '8px 10px',
-                    fontSize: 13,
-                    fontWeight: 500,
-                  }}
-                  onClick={() => {
-                    renditionRef.current?.display(ch.href);
-                    setChapterLabel(ch.label?.trim() || '');
-                    setTocOpen(false);
-                  }}
-                >
-                  {ch.label?.trim() || `Chapter ${idx + 1}`}
-                </button>
-              ))
-            )}
+            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>
+              Chapters ({spine.length})
+            </div>
+            {spine.map((ch, idx) => (
+              <button
+                key={idx}
+                type="button"
+                className={`btn ${idx === chapterIdx ? 'btn-primary' : 'btn-ghost'}`}
+                style={{
+                  width: '100%',
+                  justifyContent: 'flex-start',
+                  textAlign: 'left',
+                  padding: '8px 10px',
+                  fontSize: 12.5,
+                  marginBottom: 3,
+                }}
+                onClick={() => {
+                  setChapterIdx(idx);
+                  setTocOpen(false);
+                }}
+              >
+                {idx + 1}. {ch.title}
+              </button>
+            ))}
           </div>
         )}
 
-        {/* Reader Canvas */}
-        <div style={{ flex: 1, position: 'relative', height: '100%' }}>
-          <div ref={viewerRef} style={{ width: '100%', height: '100%' }} />
-
-          {loading && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 12,
-                background: activeTheme.bg,
-              }}
-            >
+        <div
+          ref={scrollRef}
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            padding: '16px 12px 40px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          {loading ? (
+            <div style={{ marginTop: 100, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: theme.fg }}>
               <Loader2 size={32} className="spin" color="#00bfd8" />
               <div style={{ fontSize: 13.5 }}>
                 Loading EPUB... {pct > 0 ? `${pct}% (${formatBytes(progress.loaded)})` : ''}
@@ -306,77 +360,80 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
                 </div>
               )}
             </div>
-          )}
-
-          {error && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 12,
-                color: '#fca5a5',
-              }}
-            >
-              <div>{error}</div>
+          ) : error ? (
+            <div style={{ marginTop: 80, textAlign: 'center', color: '#fca5a5' }}>
+              <p>{error}</p>
               <a href={streamUrl(item.chatId, item.id, 'telegram_hq', true)} className="btn btn-primary" style={{ textDecoration: 'none' }}>
                 Download EPUB instead
               </a>
             </div>
-          )}
-
-          {/* Prev / Next Floating Buttons */}
-          {!loading && !error && (
+          ) : (
             <>
-              <button
-                type="button"
-                onClick={() => renditionRef.current?.prev()}
+              <style>{`
+                .airgram-epub-card * { max-width: 100% !important; box-sizing: border-box !important; }
+                .airgram-epub-card { background: ${theme.card}; color: ${theme.fg}; }
+                .airgram-epub-card p, .airgram-epub-card div, .airgram-epub-card span, .airgram-epub-card li {
+                  color: ${theme.fg} !important;
+                  background: transparent !important;
+                }
+                .airgram-epub-card h1, .airgram-epub-card h2, .airgram-epub-card h3, .airgram-epub-card h4 {
+                  color: ${theme.heading} !important;
+                  line-height: 1.3;
+                  margin: 1.2em 0 0.5em;
+                }
+                .airgram-epub-card a { color: ${theme.link} !important; }
+                .airgram-epub-card img { max-width: 100% !important; height: auto !important; display: block; margin: 1.2em auto; border-radius: 6px; }
+              `}</style>
+
+              <article
+                className="airgram-epub-card"
                 style={{
-                  position: 'absolute',
-                  left: 10,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  width: 38,
-                  height: 54,
-                  borderRadius: 12,
-                  border: '1px solid var(--border)',
-                  background: 'rgba(15,23,42,0.55)',
-                  color: '#fff',
-                  cursor: 'pointer',
+                  width: '100%',
+                  maxWidth: 760,
+                  borderRadius: 10,
+                  padding: '28px 24px',
+                  boxShadow: '0 10px 45px rgba(0,0,0,0.35)',
+                  fontFamily: 'Georgia, "Times New Roman", serif',
+                  fontSize: `${fontSize}px`,
+                  lineHeight: 1.8,
+                  wordBreak: 'break-word',
+                  opacity: rendering ? 0.5 : 1,
+                }}
+                dangerouslySetInnerHTML={{ __html: chapterHtml }}
+              />
+
+              {/* Bottom Chapter Nav */}
+              <div
+                style={{
+                  width: '100%',
+                  maxWidth: 760,
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 18,
+                  gap: 10,
                 }}
-                title="Previous Page"
               >
-                <ChevronLeft size={20} />
-              </button>
-              <button
-                type="button"
-                onClick={() => renditionRef.current?.next()}
-                style={{
-                  position: 'absolute',
-                  right: 10,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  width: 38,
-                  height: 54,
-                  borderRadius: 12,
-                  border: '1px solid var(--border)',
-                  background: 'rgba(15,23,42,0.55)',
-                  color: '#fff',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                title="Next Page"
-              >
-                <ChevronRight size={20} />
-              </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={chapterIdx <= 0}
+                  onClick={() => setChapterIdx((i) => Math.max(0, i - 1))}
+                >
+                  <ChevronLeft size={16} /> Prev Chapter
+                </button>
+                <span style={{ fontSize: 12.5, color: theme.fg, opacity: 0.75 }}>
+                  {chapterIdx + 1} / {spine.length}
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={chapterIdx >= spine.length - 1}
+                  onClick={() => setChapterIdx((i) => Math.min(spine.length - 1, i + 1))}
+                >
+                  Next Chapter <ChevronRight size={16} />
+                </button>
+              </div>
             </>
           )}
         </div>
