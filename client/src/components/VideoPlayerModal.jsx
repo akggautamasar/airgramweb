@@ -11,18 +11,22 @@ import {
   Volume2,
   VolumeX,
   Maximize,
+  Minimize,
   PictureInPicture2,
   ExternalLink,
   Copy,
   Check,
   Loader2,
   Gauge,
+  Scaling,
 } from 'lucide-react';
 import { apiFetch, formatDuration, getResumeTime, setResumeTime, streamUrl } from '../api';
 
 export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpeed = 1, onClose }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
+  const hideTimerRef = useRef(null);
+
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
@@ -34,8 +38,44 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   const [vlcInfo, setVlcInfo] = useState(null);
   const [copied, setCopied] = useState(false);
   const [diagSpeed, setDiagSpeed] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [objectFit, setObjectFit] = useState('contain'); // 'contain' | 'cover'
 
   const src = item ? streamUrl(item.chatId, item.id, mode, false) : '';
+
+  const scheduleHideControls = (currentlyPlaying = playing) => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    setControlsVisible(true);
+    if (currentlyPlaying) {
+      hideTimerRef.current = setTimeout(() => {
+        setControlsVisible(false);
+      }, 2500);
+    }
+  };
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const fs = Boolean(document.fullscreenElement);
+      setIsFullscreen(fs);
+      if (fs && playing) {
+        // Hide controls quickly when entering fullscreen so only video is visible
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = setTimeout(() => setControlsVisible(false), 1500);
+      } else {
+        scheduleHideControls(playing);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, [playing]);
+
+  useEffect(() => {
+    scheduleHideControls(playing);
+    return () => {
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    };
+  }, [playing]);
 
   useEffect(() => {
     if (!item) return;
@@ -51,7 +91,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     }
   }, [item?.chatId, item?.id]);
 
-  // Periodically poll server throughput while playing
   useEffect(() => {
     const t = setInterval(async () => {
       try {
@@ -63,7 +102,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     return () => clearInterval(t);
   }, []);
 
-  // Switch between Fast Web and Telegram HQ without losing timestamp
   const handleSwitchMode = (nextMode) => {
     if (nextMode === mode) return;
     const v = videoRef.current;
@@ -93,10 +131,20 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     else v.pause();
   };
 
+  const handleVideoSurfaceClick = () => {
+    if (!controlsVisible) {
+      scheduleHideControls(playing);
+    } else {
+      togglePlay();
+      scheduleHideControls(!playing);
+    }
+  };
+
   const seekBy = (delta) => {
     const v = videoRef.current;
     if (!v) return;
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
+    scheduleHideControls(playing);
   };
 
   const handleSpeedChange = () => {
@@ -104,13 +152,13 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     const next = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
     setSpeed(next);
     if (videoRef.current) videoRef.current.playbackRate = next;
+    scheduleHideControls(playing);
   };
 
   const handlePlayInVlc = async () => {
     try {
       const data = await apiFetch(`/api/stream-link/${encodeURIComponent(item.chatId)}/${item.id}?mode=${mode}`);
       setVlcInfo(data);
-      // Try launching VLC URI handler
       window.location.href = data.vlcDeepLink;
     } catch {}
   };
@@ -129,9 +177,18 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     } catch {}
   };
 
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) containerRef.current?.requestFullscreen().catch(() => {});
-    else document.exitFullscreen().catch(() => {});
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await containerRef.current?.requestFullscreen();
+        if (videoRef.current && videoRef.current.videoWidth > videoRef.current.videoHeight) {
+          window.screen?.orientation?.lock?.('landscape').catch(() => {});
+        }
+      } else {
+        await document.exitFullscreen();
+        window.screen?.orientation?.unlock?.();
+      }
+    } catch {}
   };
 
   if (!item) return null;
@@ -143,27 +200,110 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   return (
     <div
       ref={containerRef}
+      onMouseMove={() => scheduleHideControls(playing)}
+      onTouchStart={() => {
+        if (!controlsVisible) scheduleHideControls(playing);
+      }}
       style={{
         position: 'fixed',
         inset: 0,
         zIndex: 80,
-        background: '#03060d',
-        display: 'flex',
-        flexDirection: 'column',
+        background: '#000000',
         color: '#fff',
+        overflow: 'hidden',
+        cursor: controlsVisible ? 'default' : 'none',
       }}
     >
-      {/* Top Bar (DemiPlay-inspired) */}
+      {/* 100% Fullscreen Video Layer */}
       <div
+        onClick={handleVideoSurfaceClick}
         style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <video
+          ref={videoRef}
+          src={src}
+          autoPlay
+          playsInline
+          preload="auto"
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit,
+            background: '#000',
+          }}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onWaiting={() => setBuffering(true)}
+          onPlaying={() => setBuffering(false)}
+          onCanPlay={() => setBuffering(false)}
+          onLoadedMetadata={(e) => {
+            setDuration(e.currentTarget.duration || item.duration || 0);
+            e.currentTarget.playbackRate = speed;
+          }}
+          onTimeUpdate={(e) => {
+            const v = e.currentTarget;
+            setCurrentTime(v.currentTime);
+            setResumeTime(item.chatId, item.id, v.currentTime);
+            if (v.buffered && v.buffered.length > 0) {
+              setBufferedEnd(v.buffered.end(v.buffered.length - 1));
+            }
+          }}
+        />
+
+        {buffering && (
+          <div
+            style={{
+              position: 'absolute',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 10,
+              pointerEvents: 'none',
+            }}
+          >
+            <Loader2 size={42} className="spin" color="#38bdf8" />
+            <div
+              style={{
+                padding: '5px 14px',
+                borderRadius: 999,
+                background: 'rgba(15, 23, 42, 0.85)',
+                border: '1px solid rgba(56, 189, 248, 0.3)',
+                fontSize: 12.5,
+              }}
+            >
+              {mode === 'fast_web' ? 'Fast Web Stream...' : 'Telegram HQ Stream...'}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Floating Auto-Hiding Top Bar */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: 12,
           padding: '12px 18px',
-          background: 'linear-gradient(to bottom, rgba(3,6,13,0.92), rgba(3,6,13,0))',
-          zIndex: 2,
+          background: 'linear-gradient(to bottom, rgba(0,0,0,0.88), rgba(0,0,0,0))',
+          zIndex: 3,
           flexWrap: 'wrap',
+          opacity: controlsVisible ? 1 : 0,
+          pointerEvents: controlsVisible ? 'auto' : 'none',
+          transition: 'opacity 0.25s ease',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
@@ -191,7 +331,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          {/* Mode Toggle: Telegram HQ vs Fast Web */}
           <div
             style={{
               display: 'flex',
@@ -249,117 +388,60 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
             <X size={18} />
           </button>
         </div>
-      </div>
 
-      {/* VLC Link Helper Banner */}
-      {vlcInfo && (
-        <div
-          style={{
-            margin: '0 18px 8px',
-            padding: '8px 14px',
-            borderRadius: 12,
-            background: 'rgba(15, 23, 42, 0.92)',
-            border: '1px solid rgba(245, 158, 11, 0.35)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 10,
-            flexWrap: 'wrap',
-            fontSize: 12.5,
-          }}
-        >
-          <span>VLC external stream ready (valid 12h):</span>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" className="btn" style={{ padding: '5px 10px', fontSize: 12 }} onClick={copyDirectLink}>
-              {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? 'Copied URL' : 'Copy Stream URL'}
-            </button>
-            <a
-              href={`/api/playlist/${encodeURIComponent(item.chatId)}/${item.id}.m3u`}
-              className="btn"
-              style={{ padding: '5px 10px', fontSize: 12, textDecoration: 'none' }}
-            >
-              Download .M3U
-            </a>
-            <button type="button" className="btn btn-ghost" style={{ padding: 4 }} onClick={() => setVlcInfo(null)}>
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Video Canvas */}
-      <div
-        style={{
-          flex: 1,
-          position: 'relative',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          overflow: 'hidden',
-        }}
-        onClick={togglePlay}
-      >
-        <video
-          ref={videoRef}
-          src={src}
-          autoPlay
-          playsInline
-          preload="auto"
-          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onWaiting={() => setBuffering(true)}
-          onPlaying={() => setBuffering(false)}
-          onCanPlay={() => setBuffering(false)}
-          onLoadedMetadata={(e) => {
-            setDuration(e.currentTarget.duration || item.duration || 0);
-            e.currentTarget.playbackRate = speed;
-          }}
-          onTimeUpdate={(e) => {
-            const v = e.currentTarget;
-            setCurrentTime(v.currentTime);
-            setResumeTime(item.chatId, item.id, v.currentTime);
-            if (v.buffered && v.buffered.length > 0) {
-              setBufferedEnd(v.buffered.end(v.buffered.length - 1));
-            }
-          }}
-        />
-
-        {buffering && (
+        {vlcInfo && (
           <div
             style={{
-              position: 'absolute',
+              width: '100%',
+              marginTop: 6,
+              padding: '8px 14px',
+              borderRadius: 12,
+              background: 'rgba(15, 23, 42, 0.94)',
+              border: '1px solid rgba(245, 158, 11, 0.35)',
               display: 'flex',
-              flexDirection: 'column',
               alignItems: 'center',
+              justifyContent: 'space-between',
               gap: 10,
-              pointerEvents: 'none',
+              flexWrap: 'wrap',
+              fontSize: 12.5,
             }}
           >
-            <Loader2 size={42} className="spin" color="#38bdf8" />
-            <div
-              style={{
-                padding: '5px 14px',
-                borderRadius: 999,
-                background: 'rgba(15, 23, 42, 0.85)',
-                border: '1px solid rgba(56, 189, 248, 0.3)',
-                fontSize: 12.5,
-              }}
-            >
-              {mode === 'fast_web' ? 'Fast Web Stream...' : 'Telegram HQ Stream...'}
+            <span>VLC external stream ready (valid 12h):</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" className="btn" style={{ padding: '5px 10px', fontSize: 12 }} onClick={copyDirectLink}>
+                {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? 'Copied URL' : 'Copy Stream URL'}
+              </button>
+              <a
+                href={`/api/playlist/${encodeURIComponent(item.chatId)}/${item.id}.m3u`}
+                className="btn"
+                style={{ padding: '5px 10px', fontSize: 12, textDecoration: 'none' }}
+              >
+                Download .M3U
+              </a>
+              <button type="button" className="btn btn-ghost" style={{ padding: 4 }} onClick={() => setVlcInfo(null)}>
+                <X size={14} />
+              </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Bottom Player Controls */}
+      {/* Floating Auto-Hiding Bottom Controls */}
       <div
+        onClick={(e) => e.stopPropagation()}
         style={{
-          padding: '10px 18px 16px',
-          background: 'linear-gradient(to top, rgba(3,6,13,0.95), rgba(3,6,13,0.4))',
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          padding: '18px 18px 16px',
+          background: 'linear-gradient(to top, rgba(0,0,0,0.92), rgba(0,0,0,0))',
+          zIndex: 3,
+          opacity: controlsVisible ? 1 : 0,
+          pointerEvents: controlsVisible ? 'auto' : 'none',
+          transition: 'opacity 0.25s ease',
         }}
       >
-        {/* Seekbar with buffered layer */}
         <div
           style={{ position: 'relative', height: 18, display: 'flex', alignItems: 'center', cursor: 'pointer', marginBottom: 8 }}
           onClick={(e) => {
@@ -368,10 +450,11 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
             if (videoRef.current && duration > 0) {
               videoRef.current.currentTime = pct * duration;
             }
+            scheduleHideControls(playing);
           }}
         >
-          <div style={{ width: '100%', height: 5, borderRadius: 999, background: 'rgba(255,255,255,0.18)', position: 'relative', overflow: 'hidden' }}>
-            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${bufferedPct}%`, background: 'rgba(255,255,255,0.35)' }} />
+          <div style={{ width: '100%', height: 5, borderRadius: 999, background: 'rgba(255,255,255,0.22)', position: 'relative', overflow: 'hidden' }}>
+            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${bufferedPct}%`, background: 'rgba(255,255,255,0.4)' }} />
             <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${progressPct}%`, background: '#00bfd8' }} />
           </div>
         </div>
@@ -424,7 +507,18 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="badge">{qualityBadge}</span>
+            <button
+              type="button"
+              className="btn"
+              style={{ padding: '5px 10px', fontSize: 12 }}
+              onClick={() => {
+                setObjectFit((f) => (f === 'contain' ? 'cover' : 'contain'));
+                scheduleHideControls(playing);
+              }}
+              title="Toggle Fit / Fill Screen"
+            >
+              <Scaling size={13} /> {objectFit === 'contain' ? 'Fit' : 'Fill'}
+            </button>
             <button type="button" className="btn" style={{ padding: '5px 10px', fontSize: 12 }} onClick={handleSpeedChange}>
               <Gauge size={13} /> {speed}x
             </button>
@@ -432,7 +526,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
               <PictureInPicture2 size={17} />
             </button>
             <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={toggleFullscreen} title="Fullscreen">
-              <Maximize size={17} />
+              {isFullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
             </button>
           </div>
         </div>
