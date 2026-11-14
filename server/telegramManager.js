@@ -465,7 +465,14 @@ class TelegramManager {
     if (cached) return cached;
 
     const peer = resolvePeer(session, chatId);
-    const msgs = await session.client.getMessages(peer, { ids: [Number(msgId)] });
+    let msgs;
+    try {
+      msgs = await session.client.getMessages(peer, { ids: [Number(msgId)] });
+    } catch (e) {
+      // Populate GramJS entity cache if server restarted or chat wasn't loaded yet
+      await session.client.getDialogs({ limit: 100 });
+      msgs = await session.client.getMessages(peer, { ids: [Number(msgId)] });
+    }
     const msg = msgs && msgs[0];
     if (!msg) return null;
 
