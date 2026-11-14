@@ -266,6 +266,7 @@ app.all('/api/stream/:chatId/:msgId', async (req, res) => {
       download,
     });
   } catch (err) {
+    console.error('[AirGram Stream Error]', err);
     if (!res.headersSent) {
       res.status(500).json({ error: err.message || 'Streaming error' });
     }

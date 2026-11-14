@@ -1,3 +1,4 @@
+const bigInt = require('big-integer');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { TelegramClient, Api } = require('telegram');
@@ -7,6 +8,13 @@ const { computeCheck } = require('telegram/Password');
 const API_ID = Number(process.env.TG_API_ID || 0);
 const API_HASH = process.env.TG_API_HASH || '';
 const APP_SECRET = process.env.APP_SECRET || 'airgram_default_dev_secret_change_me';
+
+function resolvePeer(session, chatId) {
+  const str = String(chatId);
+  if (str === String(session.user?.id)) return 'me';
+  if (/^-?\d+$/.test(str)) return bigInt(str);
+  return str;
+}
 
 function requireApiCreds() {
   if (!API_ID || !API_HASH) {
@@ -429,7 +437,7 @@ class TelegramManager {
       all: new Api.InputMessagesFilterEmpty(),
     };
     const filter = filterMap[tab] || filterMap.video;
-    const peer = chatId === session.user.id ? 'me' : chatId;
+    const peer = resolvePeer(session, chatId);
 
     const msgs = await session.client.getMessages(peer, {
       limit: Math.min(80, Number(limit) || 40),
@@ -456,7 +464,7 @@ class TelegramManager {
     let cached = this.messageCache.get(key);
     if (cached) return cached;
 
-    const peer = chatId === session.user.id ? 'me' : chatId;
+    const peer = resolvePeer(session, chatId);
     const msgs = await session.client.getMessages(peer, { ids: [Number(msgId)] });
     const msg = msgs && msgs[0];
     if (!msg) return null;
