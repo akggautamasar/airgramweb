@@ -1,0 +1,23 @@
+node_modules/
+server/node_modules/
+client/node_modules/
+client/dist/
+.env
+*.log
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+*.pem
+*.key
+
+# Dependencies and build files
+node_modules/
+dist/
+build/
+.next/
+__pycache__/

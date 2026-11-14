@@ -1,0 +1,16 @@
+{
+  "name": "airgram-web",
+  "version": "1.0.0",
+  "description": "AirGram — Fast, buffer-free online Telegram media player & library",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix server install && npm --prefix client install",
+    "build": "npm --prefix client run build",
+    "start": "node server/index.js",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "npm --prefix client run dev"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
