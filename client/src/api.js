@@ -17,6 +17,8 @@ export async function apiFetch(url, options = {}) {
 const PREFS_KEY = 'airgram_prefs_v1';
 const RESUME_KEY = 'airgram_resume_v1';
 const BOOKMARKS_KEY = 'airgram_bookmarks_v1';
+const PDF_PAGE_KEY = 'airgram_pdf_page_v1';
+const EPUB_CFI_KEY = 'airgram_epub_cfi_v1';
 
 const DEFAULT_PREFS = {
   theme: 'dark',
@@ -53,6 +55,40 @@ export function setResumeTime(chatId, msgId, seconds) {
     const map = JSON.parse(localStorage.getItem(RESUME_KEY) || '{}');
     map[`${chatId}_${msgId}`] = Math.floor(seconds);
     localStorage.setItem(RESUME_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+export function getPdfPage(chatId, msgId) {
+  try {
+    const map = JSON.parse(localStorage.getItem(PDF_PAGE_KEY) || '{}');
+    return Number(map[`${chatId}_${msgId}`] || 1);
+  } catch {
+    return 1;
+  }
+}
+
+export function setPdfPage(chatId, msgId, page) {
+  try {
+    const map = JSON.parse(localStorage.getItem(PDF_PAGE_KEY) || '{}');
+    map[`${chatId}_${msgId}`] = page;
+    localStorage.setItem(PDF_PAGE_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+export function getEpubCfi(chatId, msgId) {
+  try {
+    const map = JSON.parse(localStorage.getItem(EPUB_CFI_KEY) || '{}');
+    return map[`${chatId}_${msgId}`] || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setEpubCfi(chatId, msgId, cfi) {
+  try {
+    const map = JSON.parse(localStorage.getItem(EPUB_CFI_KEY) || '{}');
+    map[`${chatId}_${msgId}`] = cfi;
+    localStorage.setItem(EPUB_CFI_KEY, JSON.stringify(map));
   } catch {}
 }
 

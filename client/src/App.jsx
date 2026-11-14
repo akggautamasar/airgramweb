@@ -8,6 +8,7 @@ import VideoPlayerModal from './components/VideoPlayerModal';
 import MediaDetailModal from './components/MediaDetailModal';
 import PhotoModal from './components/PhotoModal';
 import PdfModal from './components/PdfModal';
+import EpubModal from './components/EpubModal';
 import AudioMiniPlayer from './components/AudioMiniPlayer';
 import SettingsModal from './components/SettingsModal';
 
@@ -35,6 +36,7 @@ export default function App() {
   const [activeVideo, setActiveVideo] = useState(null);
   const [activePhoto, setActivePhoto] = useState(null);
   const [activePdf, setActivePdf] = useState(null);
+  const [activeEpub, setActiveEpub] = useState(null);
   const [inspectItem, setInspectItem] = useState(null);
   const [audioTrack, setAudioTrack] = useState(null);
   const [audioQueue, setAudioQueue] = useState([]);
@@ -111,6 +113,8 @@ export default function App() {
       setActivePhoto(item);
     } else if (item.mimeType === 'application/pdf' || item.fileName?.toLowerCase().endsWith('.pdf')) {
       setActivePdf(item);
+    } else if (item.mimeType === 'application/epub+zip' || item.fileName?.toLowerCase().endsWith('.epub')) {
+      setActiveEpub(item);
     } else {
       window.open(streamUrl(item.chatId, item.id, prefs.streamingMode, true), '_blank');
     }
@@ -259,7 +263,8 @@ export default function App() {
 
       {/* Photo & PDF Modals */}
       {activePhoto && <PhotoModal item={activePhoto} onClose={() => setActivePhoto(null)} />}
-      {activePdf && <PdfModal item={activePdf} onClose={() => setActivePdf(null)} />}
+      {activePdf && <PdfModal item={activePdf} mode={prefs.streamingMode} onClose={() => setActivePdf(null)} />}
+      {activeEpub && <EpubModal item={activeEpub} mode={prefs.streamingMode} onClose={() => setActiveEpub(null)} />}
 
       {/* Persistent Audio Mini-Player */}
       {audioTrack && (
