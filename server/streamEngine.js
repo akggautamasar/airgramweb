@@ -97,6 +97,7 @@ class StreamEngine {
     const fileName = (meta.fileName || `airgram_${message.id}`).replace(/["\r\n]/g, '_');
 
     res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Range, Content-Length');
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=3600');
     res.setHeader('X-Content-Type-Options', 'nosniff');
