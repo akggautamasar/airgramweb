@@ -462,55 +462,59 @@ class TelegramManager {
 
   async getChatTimeline(session, { chatId, offsetId = 0, limit = 40, query = '' }) {
     const peer = resolvePeer(session, chatId);
+    const opts = {
+      limit: Math.min(60, Number(limit) || 40),
+      offsetId: Number(offsetId) || 0,
+    };
+    if (query && String(query).trim()) {
+      opts.search = String(query).trim();
+    }
+
     let msgs;
     try {
-      msgs = await session.client.getMessages(peer, {
-        limit: Math.min(60, Number(limit) || 40),
-        offsetId: Number(offsetId) || 0,
-        search: query || undefined,
-      });
+      msgs = await session.client.getMessages(peer, opts);
     } catch (e) {
       await session.client.getDialogs({ limit: 100 });
-      msgs = await session.client.getMessages(peer, {
-        limit: Math.min(60, Number(limit) || 40),
-        offsetId: Number(offsetId) || 0,
-        search: query || undefined,
-      });
+      msgs = await session.client.getMessages(peer, opts);
     }
 
     const items = [];
-    for (const m of msgs) {
-      if (!m || m.className === 'MessageService') continue;
-      const meta = extractMediaMeta(m, chatId);
-      if (meta) {
-        this.messageCache.set(`${session.authId}:${chatId}:${m.id}`, { message: m, meta });
+    for (const m of msgs || []) {
+      try {
+        if (!m || m.className === 'MessageService') continue;
+        const meta = extractMediaMeta(m, chatId);
+        if (meta) {
+          this.messageCache.set(`${session.authId}:${chatId}:${m.id}`, { message: m, meta });
+        }
+        let senderName = '';
+        if (m._sender) {
+          senderName =
+            m._sender.title ||
+            [m._sender.firstName, m._sender.lastName].filter(Boolean).join(' ') ||
+            m._sender.username ||
+            '';
+        }
+        items.push({
+          id: m.id,
+          chatId: String(chatId),
+          date: m.date || 0,
+          out: Boolean(m.out),
+          senderName,
+          text: m.message || '',
+          replyToMsgId: m.replyTo?.replyToMsgId || null,
+          fwdFrom: m.fwdFrom?.fromName || null,
+          media: meta,
+        });
+      } catch (itemErr) {
+        console.warn('[AirGram] Skipping message in timeline:', itemErr.message);
       }
-      let senderName = '';
-      if (m.sender) {
-        senderName =
-          m.sender.title ||
-          [m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ') ||
-          m.sender.username ||
-          '';
-      }
-      items.push({
-        id: m.id,
-        chatId: String(chatId),
-        date: m.date || 0,
-        out: Boolean(m.out),
-        senderName,
-        text: m.message || '',
-        replyToMsgId: m.replyTo?.replyToMsgId || null,
-        fwdFrom: m.fwdFrom?.fromName || null,
-        media: meta,
-      });
     }
 
-    const nextOffsetId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
+    const nextOffsetId = msgs && msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
     return {
       messages: items.reverse(),
       nextOffsetId,
-      hasMore: msgs.length >= (Number(limit) || 40),
+      hasMore: Boolean(msgs && msgs.length >= (Number(limit) || 40)),
     };
   }
 

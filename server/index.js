@@ -60,6 +60,7 @@ app.post('/api/auth/qr/start', async (req, res) => {
     const result = await tg.startQrLogin();
     res.json(result);
   } catch (err) {
+    console.error('[AirGram Chat Timeline Error]', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -167,6 +168,7 @@ app.get('/api/chats/:chatId/media', requireAuth, async (req, res) => {
     });
     res.json(result);
   } catch (err) {
+    console.error('[AirGram Chat Timeline Error]', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -184,6 +186,7 @@ app.get('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
     });
     res.json(result);
   } catch (err) {
+    console.error('[AirGram Chat Timeline Error]', err);
     res.status(500).json({ error: err.message });
   }
 });
