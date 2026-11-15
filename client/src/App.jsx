@@ -162,6 +162,41 @@ export default function App() {
     }
   };
 
+
+  const handleUploadChatFile = (file, caption, replyToMsgId, onProgress) => {
+    if (!selectedChat) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const form = new FormData();
+      form.append('file', file);
+      if (caption) form.append('caption', caption);
+      if (replyToMsgId) form.append('replyToMsgId', String(replyToMsgId));
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/chats/${encodeURIComponent(selectedChat.id)}/upload`);
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && onProgress) {
+          onProgress(Math.round((ev.loaded / ev.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        try {
+          const data = JSON.parse(xhr.responseText || '{}');
+          if (xhr.status >= 200 && xhr.status < 300) {
+            if (data.message) setChatMessages((prev) => [...prev, data.message]);
+            resolve(data);
+          } else {
+            reject(new Error(data.error || `Upload failed (${xhr.status})`));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(form);
+    });
+  };
+
   const handleSendChatMessage = async (text, replyToMsgId) => {
     if (!selectedChat) return;
     const data = await apiFetch(`/api/chats/${encodeURIComponent(selectedChat.id)}/messages`, {
@@ -347,6 +382,7 @@ export default function App() {
         onRetryChat={() => fetchChatTimeline(selectedChat?.id, 0, searchQuery, false)}
         onLoadOlderMessages={() => fetchChatTimeline(selectedChat?.id, chatNextOffsetId, searchQuery, true)}
         onSendChatMessage={handleSendChatMessage}
+        onUploadChatFile={handleUploadChatFile}
       />
 
       {/* Video Player */}
