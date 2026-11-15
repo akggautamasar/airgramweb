@@ -448,9 +448,11 @@ export default function App() {
       {audioTrack && (
         <AudioMiniPlayer
           track={audioTrack}
+          queue={audioQueue}
           mode={prefs.streamingMode}
           onPrev={() => handleStepAudio(-1)}
           onNext={() => handleStepAudio(1)}
+          onSelectTrack={(t) => setAudioTrack(t)}
           onClose={() => setAudioTrack(null)}
         />
       )}
