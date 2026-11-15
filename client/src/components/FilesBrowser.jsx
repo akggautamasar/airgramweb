@@ -62,6 +62,7 @@ export default function FilesBrowser({
   onRetryChat,
   onLoadOlderMessages,
   onSendChatMessage,
+  onUploadChatFile,
 }) {
   const shouldLoadThumbs = prefs.loadThumbnails && !(isPlayingSomething && prefs.suspendThumbsOnPlay);
   const displayedItems = showBookmarksOnly ? bookmarks : items;
@@ -248,6 +249,7 @@ export default function FilesBrowser({
             onOpenMedia={onOpenItem}
             onShareMedia={onShareItem}
             onSendMessage={onSendChatMessage}
+            onUploadFile={onUploadChatFile}
             prefs={prefs}
             isPlayingSomething={isPlayingSomething}
           />

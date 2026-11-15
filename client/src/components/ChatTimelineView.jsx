@@ -10,6 +10,7 @@ import {
   ChevronUp,
   X,
   Share2,
+  Paperclip,
 } from 'lucide-react';
 import { formatBytes, formatDate, formatDuration } from '../api';
 
@@ -49,13 +50,17 @@ export default function ChatTimelineView({
   onOpenMedia,
   onShareMedia,
   onSendMessage,
+  onUploadFile,
   prefs,
   isPlayingSomething,
 }) {
   const bottomRef = useRef(null);
+  const fileInputRef = useRef(null);
   const prevLenRef = useRef(0);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [pendingFile, setPendingFile] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
 
   const shouldLoadThumbs = prefs.loadThumbnails && !(isPlayingSomething && prefs.suspendThumbsOnPlay);
@@ -75,15 +80,23 @@ export default function ChatTimelineView({
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!draft.trim() || sending) return;
+    if (sending) return;
+    if (!pendingFile && !draft.trim()) return;
     setSending(true);
+    setUploadPct(0);
     try {
-      await onSendMessage(draft.trim(), replyTo?.id || null);
+      if (pendingFile && onUploadFile) {
+        await onUploadFile(pendingFile, draft.trim(), replyTo?.id || null, setUploadPct);
+        setPendingFile(null);
+      } else {
+        await onSendMessage(draft.trim(), replyTo?.id || null);
+      }
       setDraft('');
       setReplyTo(null);
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 60);
     } finally {
       setSending(false);
+      setUploadPct(0);
     }
   };
 
@@ -391,16 +404,65 @@ export default function ChatTimelineView({
             </button>
           </div>
         )}
+        {pendingFile && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              fontSize: 12,
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              📎 {pendingFile.name} ({formatBytes(pendingFile.size)})
+              {sending && uploadPct > 0 ? ` — ${uploadPct}%` : ''}
+            </span>
+            {!sending && (
+              <button type="button" className="btn btn-ghost" style={{ padding: 2 }} onClick={() => setPendingFile(null)}>
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) setPendingFile(f);
+            e.target.value = '';
+          }}
+        />
         <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: '9px 11px' }}
+            disabled={sending}
+            onClick={() => fileInputRef.current?.click()}
+            title="Upload file to Telegram chat"
+          >
+            <Paperclip size={16} />
+          </button>
           <input
             type="text"
             className="input"
-            placeholder={`Message ${chat?.title || 'chat'}...`}
+            placeholder={pendingFile ? 'Add a caption (optional)...' : `Message ${chat?.title || 'chat'}...`}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             style={{ padding: '9px 13px', fontSize: 13.5 }}
           />
-          <button type="submit" className="btn btn-primary" disabled={sending || !draft.trim()} style={{ padding: '9px 16px' }}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={sending || (!draft.trim() && !pendingFile)}
+            style={{ padding: '9px 16px' }}
+          >
             {sending ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
           </button>
         </div>

@@ -1,20 +1,26 @@
 import React, { useEffect, useState } from 'react';
-import { X, Trash2, Copy, Check, LogOut, Activity } from 'lucide-react';
-import { apiFetch } from '../api';
+import { X, Trash2, Copy, Check, LogOut, Activity, Share2, Lock, Clock } from 'lucide-react';
+import { apiFetch, formatBytes } from '../api';
 
 export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onLogout, onClose }) {
   const [diag, setDiag] = useState(null);
+  const [shares, setShares] = useState([]);
   const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedShareId, setCopiedShareId] = useState('');
 
-  const loadDiag = async () => {
+  const loadDiagAndShares = async () => {
     try {
-      const data = await apiFetch('/api/diagnostics');
-      setDiag(data);
+      const [d, s] = await Promise.all([
+        apiFetch('/api/diagnostics'),
+        apiFetch('/api/shares').catch(() => ({ shares: [] })),
+      ]);
+      setDiag(d);
+      setShares(s.shares || []);
     } catch {}
   };
 
   useEffect(() => {
-    loadDiag();
+    loadDiagAndShares();
   }, []);
 
   const clearCache = async () => {
@@ -29,13 +35,26 @@ export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onL
     setTimeout(() => setCopiedKey(false), 2000);
   };
 
+  const copyShareUrl = async (share) => {
+    await navigator.clipboard.writeText(share.shareUrl);
+    setCopiedShareId(share.id);
+    setTimeout(() => setCopiedShareId(''), 1800);
+  };
+
+  const revokeShare = async (shareId) => {
+    try {
+      await apiFetch(`/api/shares/${encodeURIComponent(shareId)}`, { method: 'DELETE' });
+      setShares((prev) => prev.filter((s) => s.id !== shareId));
+    } catch {}
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: 540,
+          maxWidth: 560,
           background: 'var(--bg-elevated)',
           border: '1px solid var(--border)',
           borderRadius: 20,
@@ -45,7 +64,7 @@ export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onL
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-          <h2 style={{ margin: 0, fontSize: 19, fontWeight: 800 }}>AirGram Settings & Diagnostics</h2>
+          <h2 style={{ margin: 0, fontSize: 19, fontWeight: 800 }}>AirGram Settings & Manager</h2>
           <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={onClose}>
             <X size={18} />
           </button>
@@ -111,6 +130,76 @@ export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onL
             />
           </label>
 
+          {/* Share Link Manager */}
+          <div
+            style={{
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 14,
+              padding: 14,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13.5 }}>
+                <Share2 size={15} color="#00bfd8" /> Shared Links ({shares.length})
+              </span>
+            </div>
+            {shares.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+                No active share links yet. Use the Share button on any file to create one.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 200, overflowY: 'auto' }}>
+                {shares.map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 10,
+                      padding: '8px 10px',
+                      borderRadius: 10,
+                      background: 'var(--bg)',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {s.meta?.title || s.meta?.fileName || s.id}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                        <span>{formatBytes(s.meta?.size)}</span>
+                        {s.requiresPassword && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                            <Lock size={10} /> Protected
+                          </span>
+                        )}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                          <Clock size={10} /> {s.expiresAt ? new Date(s.expiresAt).toLocaleDateString() : 'Lifetime'}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 5 }}>
+                      <button type="button" className="btn" style={{ padding: '5px 8px' }} onClick={() => copyShareUrl(s)} title="Copy Share Link">
+                        {copiedShareId === s.id ? <Check size={13} /> : <Copy size={13} />}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: '5px 8px', color: '#fca5a5', borderColor: 'rgba(239,68,68,0.3)' }}
+                        onClick={() => revokeShare(s.id)}
+                        title="Revoke Link"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Diagnostics Card */}
           <div
             style={{
@@ -118,7 +207,6 @@ export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onL
               border: '1px solid var(--border)',
               borderRadius: 14,
               padding: 14,
-              marginTop: 4,
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
