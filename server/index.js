@@ -171,6 +171,41 @@ app.get('/api/chats/:chatId/media', requireAuth, async (req, res) => {
   }
 });
 
+
+app.get('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { offsetId = 0, limit = 40, q = '' } = req.query;
+    const result = await tg.getChatTimeline(req.tgSession, {
+      chatId,
+      offsetId,
+      limit,
+      query: q,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { text, replyToMsgId } = req.body;
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ error: 'Message text is required' });
+    }
+    const msg = await tg.sendChatMessage(req.tgSession, {
+      chatId,
+      text: String(text).trim(),
+      replyToMsgId,
+    });
+    res.json({ message: msg });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/thumb/:chatId/:msgId', requireAuth, async (req, res) => {
   try {
     const { chatId, msgId } = req.params;
@@ -226,7 +261,8 @@ app.get('/api/playlist/:chatId/:msgId.m3u', requireAuth, async (req, res) => {
   const directUrl = `${proto}://${host}/api/stream/${chatId}/${msgId}?mode=telegram_hq&st=${encodeURIComponent(streamToken)}`;
 
   res.setHeader('Content-Type', 'audio/x-mpegurl');
-  res.setHeader('Content-Disposition', `attachment; filename="${entry.meta.fileName}.m3u"`);
+  const asciiM3u = (entry.meta.fileName || 'stream').replace(/[^\x20-\x7E]/g, '_').replace(/["\\;\r\n]/g, '_');
+  res.setHeader('Content-Disposition', `attachment; filename="${asciiM3u}.m3u"`);
   res.send(`#EXTM3U\n#EXTINF:-1,${entry.meta.title || entry.meta.fileName}\n${directUrl}\n`);
 });
 

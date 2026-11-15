@@ -459,6 +459,80 @@ class TelegramManager {
     return { items, nextOffsetId, hasMore: msgs.length >= (Number(limit) || 40) };
   }
 
+
+  async getChatTimeline(session, { chatId, offsetId = 0, limit = 40, query = '' }) {
+    const peer = resolvePeer(session, chatId);
+    let msgs;
+    try {
+      msgs = await session.client.getMessages(peer, {
+        limit: Math.min(60, Number(limit) || 40),
+        offsetId: Number(offsetId) || 0,
+        search: query || undefined,
+      });
+    } catch (e) {
+      await session.client.getDialogs({ limit: 100 });
+      msgs = await session.client.getMessages(peer, {
+        limit: Math.min(60, Number(limit) || 40),
+        offsetId: Number(offsetId) || 0,
+        search: query || undefined,
+      });
+    }
+
+    const items = [];
+    for (const m of msgs) {
+      if (!m || m.className === 'MessageService') continue;
+      const meta = extractMediaMeta(m, chatId);
+      if (meta) {
+        this.messageCache.set(`${session.authId}:${chatId}:${m.id}`, { message: m, meta });
+      }
+      let senderName = '';
+      if (m.sender) {
+        senderName =
+          m.sender.title ||
+          [m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ') ||
+          m.sender.username ||
+          '';
+      }
+      items.push({
+        id: m.id,
+        chatId: String(chatId),
+        date: m.date || 0,
+        out: Boolean(m.out),
+        senderName,
+        text: m.message || '',
+        replyToMsgId: m.replyTo?.replyToMsgId || null,
+        fwdFrom: m.fwdFrom?.fromName || null,
+        media: meta,
+      });
+    }
+
+    const nextOffsetId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
+    return {
+      messages: items.reverse(),
+      nextOffsetId,
+      hasMore: msgs.length >= (Number(limit) || 40),
+    };
+  }
+
+  async sendChatMessage(session, { chatId, text, replyToMsgId }) {
+    const peer = resolvePeer(session, chatId);
+    const m = await session.client.sendMessage(peer, {
+      message: String(text || ''),
+      replyTo: replyToMsgId ? Number(replyToMsgId) : undefined,
+    });
+    return {
+      id: m.id,
+      chatId: String(chatId),
+      date: m.date || Math.floor(Date.now() / 1000),
+      out: true,
+      senderName: [session.user?.firstName, session.user?.lastName].filter(Boolean).join(' '),
+      text: m.message || String(text || ''),
+      replyToMsgId: replyToMsgId ? Number(replyToMsgId) : null,
+      fwdFrom: null,
+      media: null,
+    };
+  }
+
   async getMessageAndMeta(session, chatId, msgId) {
     const key = `${session.authId}:${chatId}:${msgId}`;
     let cached = this.messageCache.get(key);

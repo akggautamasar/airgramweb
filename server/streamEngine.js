@@ -94,19 +94,17 @@ class StreamEngine {
   async handleStreamRequest({ req, res, client, message, meta, mode = STREAMING_MODES.FAST_WEB, download = false }) {
     const fileSize = Number(meta.size || 0);
     const mimeType = meta.mimeType || 'application/octet-stream';
-    const fileName = (meta.fileName || `airgram_${message.id}`).replace(/["\r\n]/g, '_');
+    const rawName = meta.fileName || `airgram_${message.id}`;
+    const asciiName = rawName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\;\r\n]/g, '_');
+    const utf8Name = encodeURIComponent(rawName);
+    const dispType = download ? 'attachment' : 'inline';
 
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Range, Content-Length');
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=3600');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-
-    if (download) {
-      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    } else {
-      res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
-    }
+    res.setHeader('Content-Disposition', `${dispType}; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`);
 
     if (req.method === 'HEAD') {
       if (fileSize > 0) res.setHeader('Content-Length', String(fileSize));
