@@ -19,6 +19,8 @@ import {
   Loader2,
   Gauge,
   Scaling,
+  FastForward,
+  Rewind,
 } from 'lucide-react';
 import { apiFetch, formatDuration, getResumeTime, setResumeTime, streamUrl } from '../api';
 
@@ -26,6 +28,9 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const hideTimerRef = useRef(null);
+  const tapTimerRef = useRef(null);
+  const lastTapRef = useRef({ time: 0, side: null });
+  const seekFeedbackTimerRef = useRef(null);
 
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
@@ -41,6 +46,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [objectFit, setObjectFit] = useState('contain'); // 'contain' | 'cover'
+  const [seekOverlay, setSeekOverlay] = useState(null); // { side: 'left'|'right', delta: number }
 
   const src = item ? streamUrl(item.chatId, item.id, mode, false) : '';
 
@@ -50,7 +56,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     if (currentlyPlaying) {
       hideTimerRef.current = setTimeout(() => {
         setControlsVisible(false);
-      }, 2500);
+      }, 2600);
     }
   };
 
@@ -59,7 +65,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
       const fs = Boolean(document.fullscreenElement);
       setIsFullscreen(fs);
       if (fs && playing) {
-        // Hide controls quickly when entering fullscreen so only video is visible
         if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
         hideTimerRef.current = setTimeout(() => setControlsVisible(false), 1500);
       } else {
@@ -74,6 +79,8 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     scheduleHideControls(playing);
     return () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+      if (seekFeedbackTimerRef.current) clearTimeout(seekFeedbackTimerRef.current);
     };
   }, [playing]);
 
@@ -131,20 +138,45 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     else v.pause();
   };
 
-  const handleVideoSurfaceClick = () => {
-    if (!controlsVisible) {
-      scheduleHideControls(playing);
-    } else {
-      togglePlay();
-      scheduleHideControls(!playing);
-    }
-  };
-
   const seekBy = (delta) => {
     const v = videoRef.current;
     if (!v) return;
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
-    scheduleHideControls(playing);
+  };
+
+  // Single tap -> toggle controls; Double tap left/right -> -10s / +10s
+  const handleVideoSurfaceClick = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const side = e.clientX - rect.left < rect.width / 2 ? 'left' : 'right';
+    const now = Date.now();
+    const isDoubleTap = now - lastTapRef.current.time < 280 && lastTapRef.current.side === side;
+
+    if (isDoubleTap) {
+      if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+      lastTapRef.current = { time: now, side };
+      const delta = side === 'right' ? 10 : -10;
+      seekBy(delta);
+
+      setSeekOverlay((prev) => ({
+        side,
+        delta: prev && prev.side === side ? prev.delta + delta : delta,
+      }));
+      if (seekFeedbackTimerRef.current) clearTimeout(seekFeedbackTimerRef.current);
+      seekFeedbackTimerRef.current = setTimeout(() => setSeekOverlay(null), 650);
+    } else {
+      lastTapRef.current = { time: now, side };
+      if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+      tapTimerRef.current = setTimeout(() => {
+        setControlsVisible((vis) => {
+          const next = !vis;
+          if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+          if (next && playing) {
+            hideTimerRef.current = setTimeout(() => setControlsVisible(false), 2600);
+          }
+          return next;
+        });
+      }, 240);
+    }
   };
 
   const handleSpeedChange = () => {
@@ -201,9 +233,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     <div
       ref={containerRef}
       onMouseMove={() => scheduleHideControls(playing)}
-      onTouchStart={() => {
-        if (!controlsVisible) scheduleHideControls(playing);
-      }}
       style={{
         position: 'fixed',
         inset: 0,
@@ -212,6 +241,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
         color: '#fff',
         overflow: 'hidden',
         cursor: controlsVisible ? 'default' : 'none',
+        userSelect: 'none',
       }}
     >
       {/* 100% Fullscreen Video Layer */}
@@ -257,6 +287,39 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
             }
           }}
         />
+
+        {/* Double-Tap Seek Feedback Overlay */}
+        {seekOverlay && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              [seekOverlay.side === 'left' ? 'left' : 'right']: '14%',
+              transform: 'translateY(-50%)',
+              background: 'rgba(15, 23, 42, 0.82)',
+              border: '1px solid rgba(255,255,255,0.22)',
+              borderRadius: 999,
+              padding: '14px 22px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 16,
+              fontWeight: 800,
+              pointerEvents: 'none',
+              boxShadow: '0 8px 30px rgba(0,0,0,0.45)',
+            }}
+          >
+            {seekOverlay.side === 'left' ? (
+              <>
+                <Rewind size={20} /> {seekOverlay.delta}s
+              </>
+            ) : (
+              <>
+                +{seekOverlay.delta}s <FastForward size={20} />
+              </>
+            )}
+          </div>
+        )}
 
         {buffering && (
           <div
@@ -464,10 +527,10 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
             <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={togglePlay}>
               {playing ? <Pause size={18} /> : <Play size={18} fill="#fff" />}
             </button>
-            <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={() => seekBy(-10)} title="-10s">
+            <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={() => { seekBy(-10); scheduleHideControls(playing); }} title="-10s">
               <RotateCcw size={16} />
             </button>
-            <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={() => seekBy(10)} title="+10s">
+            <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={() => { seekBy(10); scheduleHideControls(playing); }} title="+10s">
               <RotateCw size={16} />
             </button>
 

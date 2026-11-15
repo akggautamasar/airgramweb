@@ -13,14 +13,17 @@ import {
   Bookmark,
   Loader2,
   Menu,
+  MessageSquare,
 } from 'lucide-react';
 import { formatBytes, formatDuration, formatDate, getResumeTime, streamUrl } from '../api';
+import ChatTimelineView from './ChatTimelineView';
 
 const TABS = [
   { id: 'video', label: 'Videos', icon: Film },
   { id: 'audio', label: 'Audio', icon: Music },
   { id: 'photo', label: 'Photos', icon: ImageIcon },
   { id: 'document', label: 'Documents', icon: FileText },
+  { id: 'chats', label: 'Chats', icon: MessageSquare },
 ];
 
 export default function FilesBrowser({
@@ -45,6 +48,11 @@ export default function FilesBrowser({
   onOpenItem,
   onInspectItem,
   onOpenMobileChats,
+  chatMessages = [],
+  chatLoading = false,
+  chatHasMore = false,
+  onLoadOlderMessages,
+  onSendChatMessage,
 }) {
   const shouldLoadThumbs = prefs.loadThumbnails && !(isPlayingSomething && prefs.suspendThumbsOnPlay);
 
@@ -201,7 +209,27 @@ export default function FilesBrowser({
         </div>
       )}
 
-      {/* Files Grid / List */}
+      {/* Telegram Chat Screen Tab */}
+      {!showBookmarksOnly && tab === 'chats' ? (
+        chat ? (
+          <ChatTimelineView
+            chat={chat}
+            messages={chatMessages}
+            loading={chatLoading}
+            hasMore={chatHasMore}
+            onLoadOlder={onLoadOlderMessages}
+            onOpenMedia={onOpenItem}
+            onSendMessage={onSendChatMessage}
+            prefs={prefs}
+            isPlayingSomething={isPlayingSomething}
+          />
+        ) : (
+          <div style={{ textAlign: 'center', marginTop: 80, color: 'var(--text-muted)' }}>
+            Select any chat on the left to view its Telegram messages.
+          </div>
+        )
+      ) : (
+      /* Files Grid / List */
       <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
         {!chat && !showBookmarksOnly ? (
           <div style={{ textAlign: 'center', marginTop: 80, color: 'var(--text-muted)' }}>
@@ -443,6 +471,7 @@ export default function FilesBrowser({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
