@@ -32,6 +32,11 @@ export default function App() {
   const [mediaLoading, setMediaLoading] = useState(false);
   const [nextOffsetId, setNextOffsetId] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatNextOffsetId, setChatNextOffsetId] = useState(0);
+  const [chatHasMore, setChatHasMore] = useState(false);
+  const [chatError, setChatError] = useState('');
 
   const [activeVideo, setActiveVideo] = useState(null);
   const [activePhoto, setActivePhoto] = useState(null);
@@ -96,9 +101,41 @@ export default function App() {
     }
   };
 
+
+  const fetchChatTimeline = async (chatId, offsetId = 0, query = '', prepend = false) => {
+    if (!chatId) return;
+    setChatLoading(true);
+    setChatError('');
+    try {
+      const data = await apiFetch(
+        `/api/chats/${encodeURIComponent(chatId)}/messages?offsetId=${offsetId}&limit=40&q=${encodeURIComponent(query)}`
+      );
+      setChatMessages((prev) => (prepend ? [...(data.messages || []), ...prev] : data.messages || []));
+      setChatNextOffsetId(data.nextOffsetId || 0);
+      setChatHasMore(Boolean(data.hasMore));
+    } catch (err) {
+      setChatError(err.message || 'Failed to load messages');
+      if (!prepend) setChatMessages([]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const handleSendChatMessage = async (text, replyToMsgId) => {
+    if (!selectedChat) return;
+    const data = await apiFetch(`/api/chats/${encodeURIComponent(selectedChat.id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text, replyToMsgId }),
+    });
+    if (data.message) {
+      setChatMessages((prev) => [...prev, data.message]);
+    }
+  };
+
   useEffect(() => {
     if (selectedChat && !showBookmarksOnly) {
-      fetchMedia(selectedChat.id, tab, 0, searchQuery, false);
+      if (tab === 'chats') fetchChatTimeline(selectedChat.id, 0, searchQuery, false);
+      else fetchMedia(selectedChat.id, tab, 0, searchQuery, false);
     }
   }, [selectedChat?.id, tab, showBookmarksOnly]);
 
@@ -140,7 +177,7 @@ export default function App() {
 
   if (checkingAuth) {
     return (
-      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+      <div style={{ height: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
         <Loader2 size={24} className="spin" color="#00bfd8" />
         <span>Connecting to AirGram...</span>
       </div>
@@ -159,7 +196,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden' }}>
       {/* Desktop Chats Sidebar */}
       <div className="desktop-only" style={{ height: '100%' }}>
         <ChatsSidebar
@@ -221,7 +258,7 @@ export default function App() {
         onLoadMore={() => fetchMedia(selectedChat?.id, tab, nextOffsetId, searchQuery, true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        onSearchSubmit={() => fetchMedia(selectedChat?.id, tab, 0, searchQuery, false)}
+        onSearchSubmit={() => (tab === 'chats' ? fetchChatTimeline(selectedChat?.id, 0, searchQuery, false) : fetchMedia(selectedChat?.id, tab, 0, searchQuery, false))}
         viewMode={prefs.viewMode}
         onViewModeChange={(v) => updatePrefs({ ...prefs, viewMode: v })}
         prefs={prefs}
@@ -233,6 +270,13 @@ export default function App() {
         onOpenItem={handleOpenItem}
         onInspectItem={setInspectItem}
         onOpenMobileChats={() => setMobileChatsOpen(true)}
+        chatMessages={chatMessages}
+        chatLoading={chatLoading}
+        chatHasMore={chatHasMore}
+        chatError={chatError}
+        onRetryChat={() => fetchChatTimeline(selectedChat?.id, 0, searchQuery, false)}
+        onLoadOlderMessages={() => fetchChatTimeline(selectedChat?.id, chatNextOffsetId, searchQuery, true)}
+        onSendChatMessage={handleSendChatMessage}
       />
 
       {/* Video Player */}
