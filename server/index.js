@@ -141,7 +141,13 @@ app.post('/api/auth/session', async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', requireAuth, (req, res) => {
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  const userId = req.tgSession.user?.id;
+  const cfg = backupStore.getConfig(userId);
+  const hasAnyChannel = Object.values(cfg.channels || {}).some(Boolean);
+  if (!hasAnyChannel && cfg.indexedCount === 0) {
+    tg.loadIndexFromSavedMessages(req.tgSession, backupStore).catch(() => {});
+  }
   res.json({
     user: req.tgSession.user,
     sessionString: req.tgSession.sessionString,
@@ -519,12 +525,20 @@ function humanSize(bytes) {
   return `${(b / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
-app.get('/api/backup/config', requireAuth, (req, res) => {
-  res.json(backupStore.getConfig(req.tgSession.user?.id));
+app.get('/api/backup/config', requireAuth, async (req, res) => {
+  const userId = req.tgSession.user?.id;
+  let cfg = backupStore.getConfig(userId);
+  const hasAnyChannel = Object.values(cfg.channels || {}).some(Boolean);
+  if (!hasAnyChannel && cfg.indexedCount === 0) {
+    await tg.loadIndexFromSavedMessages(req.tgSession, backupStore);
+    cfg = backupStore.getConfig(userId);
+  }
+  res.json(cfg);
 });
 
-app.post('/api/backup/config', requireAuth, (req, res) => {
+app.post('/api/backup/config', requireAuth, async (req, res) => {
   const updated = backupStore.setConfig(req.tgSession.user?.id, req.body || {});
+  await tg.saveIndexToSavedMessages(req.tgSession, backupStore);
   res.json(updated);
 });
 
@@ -650,7 +664,9 @@ app.post('/api/backup/upload', requireAuth, upload.single('file'), async (req, r
 
 app.get('/api/backup/drive', requireAuth, async (req, res) => {
   const userId = req.tgSession.user?.id;
-  if (backupStore.getConfig(userId).indexedCount === 0) {
+  const cfg = backupStore.getConfig(userId);
+  const hasAnyChannel = Object.values(cfg.channels || {}).some(Boolean);
+  if (!hasAnyChannel || cfg.indexedCount === 0) {
     await tg.loadIndexFromSavedMessages(req.tgSession, backupStore);
   }
   res.json(backupStore.getDriveView(userId));
