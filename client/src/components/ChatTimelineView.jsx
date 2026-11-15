@@ -42,6 +42,8 @@ export default function ChatTimelineView({
   messages,
   loading,
   hasMore,
+  error,
+  onRetry,
   onLoadOlder,
   onOpenMedia,
   onSendMessage,
@@ -111,6 +113,15 @@ export default function ChatTimelineView({
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 80, gap: 12, color: 'var(--text-muted)' }}>
             <Loader2 size={28} className="spin" />
             <span>Loading Telegram chat history...</span>
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', marginTop: 60, color: '#ef4444', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+            <div>{error}</div>
+            {onRetry && (
+              <button type="button" className="btn btn-primary" onClick={onRetry}>
+                Retry
+              </button>
+            )}
           </div>
         ) : messages.length === 0 ? (
           <div style={{ textAlign: 'center', marginTop: 80, color: 'var(--text-muted)' }}>

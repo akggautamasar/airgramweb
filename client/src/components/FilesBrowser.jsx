@@ -51,6 +51,8 @@ export default function FilesBrowser({
   chatMessages = [],
   chatLoading = false,
   chatHasMore = false,
+  chatError = '',
+  onRetryChat,
   onLoadOlderMessages,
   onSendChatMessage,
 }) {
@@ -217,6 +219,8 @@ export default function FilesBrowser({
             messages={chatMessages}
             loading={chatLoading}
             hasMore={chatHasMore}
+            error={chatError}
+            onRetry={onRetryChat}
             onLoadOlder={onLoadOlderMessages}
             onOpenMedia={onOpenItem}
             onSendMessage={onSendChatMessage}
