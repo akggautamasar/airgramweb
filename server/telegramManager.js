@@ -400,9 +400,50 @@ class TelegramManager {
   }
 
   // --- Chats & Media ---
-  async getDialogs(session, { limit = 100 } = {}) {
+  async getDialogs(session, { limit = 150 } = {}) {
     const dialogs = await session.client.getDialogs({ limit });
     const meId = session.user.id;
+
+    // Fetch Telegram Chat Folders (DialogFilters)
+    let folders = [];
+    try {
+      const resFilters = await session.client.invoke(new Api.messages.GetDialogFilters());
+      const rawFilters = resFilters?.filters || resFilters || [];
+      for (const f of rawFilters) {
+        if (f.className === 'DialogFilter' || f.className === 'DialogFilterChatlist') {
+          const includeIds = new Set(
+            (f.includePeers || []).map((p) => {
+              if (p.userId) return p.userId.toString();
+              if (p.chatId) return `-${p.chatId.toString()}`;
+              if (p.channelId) return `-100${p.channelId.toString()}`;
+              return '';
+            }).filter(Boolean)
+          );
+          const pinnedIds = new Set(
+            (f.pinnedPeers || []).map((p) => {
+              if (p.userId) return p.userId.toString();
+              if (p.chatId) return `-${p.chatId.toString()}`;
+              if (p.channelId) return `-100${p.channelId.toString()}`;
+              return '';
+            }).filter(Boolean)
+          );
+          folders.push({
+            id: f.id,
+            title: typeof f.title === 'string' ? f.title : (f.title?.text || `Folder ${f.id}`),
+            includeIds: Array.from(includeIds),
+            pinnedIds: Array.from(pinnedIds),
+            contacts: Boolean(f.contacts),
+            nonContacts: Boolean(f.nonContacts),
+            groups: Boolean(f.groups),
+            broadcasts: Boolean(f.broadcasts),
+            bots: Boolean(f.bots),
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[AirGram] Could not load Telegram folders:', err.message);
+    }
+
     const list = dialogs.map((d) => {
       const entity = d.entity;
       const id = d.id ? d.id.toString() : '';
@@ -417,15 +458,101 @@ class TelegramManager {
         id,
         title,
         type,
+        pinned: Boolean(d.pinned),
+        archived: d.folderId === 1,
         unreadCount: d.unreadCount || 0,
         lastMessageDate: d.date || 0,
         lastMessageText: d.message?.message ? d.message.message.slice(0, 80) : '',
       };
     });
 
-    // Pin Saved Messages to top
-    list.sort((a, b) => (a.type === 'saved' ? -1 : b.type === 'saved' ? 1 : 0));
-    return list;
+    // Saved Messages first, then pinned, then normal order
+    list.sort((a, b) => {
+      if (a.type === 'saved') return -1;
+      if (b.type === 'saved') return 1;
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return 0;
+    });
+
+    return { chats: list, folders };
+  }
+
+  async searchGlobalMedia(session, { query = '', tab = 'all', limit = 40 }) {
+    const q = String(query || '').trim();
+    if (!q) return { items: [] };
+
+    const filterMap = {
+      video: new Api.InputMessagesFilterVideo(),
+      audio: new Api.InputMessagesFilterMusic(),
+      photo: new Api.InputMessagesFilterPhotos(),
+      document: new Api.InputMessagesFilterDocument(),
+      all: new Api.InputMessagesFilterEmpty(),
+    };
+    const filter = filterMap[tab] || filterMap.all;
+
+    const res = await session.client.invoke(
+      new Api.messages.SearchGlobal({
+        q,
+        filter,
+        minDate: 0,
+        maxDate: 0,
+        offsetRate: 0,
+        offsetPeer: new Api.InputPeerEmpty(),
+        offsetId: 0,
+        limit: Math.min(60, Number(limit) || 40),
+      })
+    );
+
+    const chatMap = new Map();
+    for (const c of res.chats || []) {
+      const cid = c.className === 'Channel' ? `-100${c.id.toString()}` : `-${c.id.toString()}`;
+      chatMap.set(c.id.toString(), { id: cid, title: c.title || 'Channel' });
+    }
+    for (const u of res.users || []) {
+      chatMap.set(u.id.toString(), {
+        id: u.id.toString(),
+        title: [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || 'User',
+      });
+    }
+
+    const items = [];
+    for (const m of res.messages || []) {
+      if (!m || m.className === 'MessageService') continue;
+      let rawPeerId = '';
+      if (m.peerId?.channelId) rawPeerId = `-100${m.peerId.channelId.toString()}`;
+      else if (m.peerId?.chatId) rawPeerId = `-${m.peerId.chatId.toString()}`;
+      else if (m.peerId?.userId) rawPeerId = m.peerId.userId.toString();
+
+      const meta = extractMediaMeta(m, rawPeerId);
+      if (meta) {
+        const lookupKey = (m.peerId?.channelId || m.peerId?.chatId || m.peerId?.userId || '').toString();
+        meta.chatTitle = chatMap.get(lookupKey)?.title || '';
+        this.messageCache.set(`${session.authId}:${rawPeerId}:${m.id}`, { message: m, meta });
+        items.push(meta);
+      }
+    }
+    return { items };
+  }
+
+  async getOrReconnectShareClient(shareId, sessionString) {
+    const key = `share_${shareId}`;
+    let entry = this.activeClients.get(key);
+    if (entry) {
+      entry.lastUsed = Date.now();
+      if (!entry.client.connected) await entry.client.connect();
+      return { ...entry, authId: key };
+    }
+    const client = this.createClient(sessionString);
+    await client.connect();
+    const me = await client.getMe();
+    entry = {
+      client,
+      user: serializeUser(me),
+      sessionString,
+      lastUsed: Date.now(),
+    };
+    this.activeClients.set(key, entry);
+    return { ...entry, authId: key };
   }
 
   async getMediaMessages(session, { chatId, tab = 'video', offsetId = 0, limit = 40, query = '' }) {
