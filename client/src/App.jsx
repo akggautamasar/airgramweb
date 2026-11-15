@@ -22,6 +22,7 @@ import AudioMiniPlayer from './components/AudioMiniPlayer';
 import SettingsModal from './components/SettingsModal';
 import ShareModal from './components/ShareModal';
 import PublicShareView from './components/PublicShareView';
+import CloudDriveView from './components/CloudDriveView';
 
 export default function App() {
   // Handle public share route /s/:shareId without requiring Telegram login
@@ -68,6 +69,7 @@ export default function App() {
   const [audioTrack, setAudioTrack] = useState(null);
   const [audioQueue, setAudioQueue] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', prefs.theme);
@@ -298,8 +300,11 @@ export default function App() {
           onSelectChat={(c) => {
             setShowBookmarksOnly(false);
             setGlobalSearch(false);
+            setCloudDriveOpen(false);
             setSelectedChat(c);
           }}
+          cloudDriveOpen={cloudDriveOpen}
+          onOpenCloudDrive={() => setCloudDriveOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
         />
       </div>
@@ -329,7 +334,13 @@ export default function App() {
               onSelectChat={(c) => {
                 setShowBookmarksOnly(false);
                 setGlobalSearch(false);
+                setCloudDriveOpen(false);
                 setSelectedChat(c);
+                setMobileChatsOpen(false);
+              }}
+              cloudDriveOpen={cloudDriveOpen}
+              onOpenCloudDrive={() => {
+                setCloudDriveOpen(true);
                 setMobileChatsOpen(false);
               }}
               onOpenSettings={() => {
@@ -341,7 +352,16 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Media Browser */}
+      {/* Main Media Browser or 7-Channel Cloud Drive */}
+      {cloudDriveOpen ? (
+        <CloudDriveView
+          chats={chats}
+          prefs={prefs}
+          onOpenItem={handleOpenItem}
+          onShareItem={setShareItem}
+          onOpenMobileChats={() => setMobileChatsOpen(true)}
+        />
+      ) : (
       <FilesBrowser
         chat={selectedChat}
         tab={tab}
@@ -384,6 +404,7 @@ export default function App() {
         onSendChatMessage={handleSendChatMessage}
         onUploadChatFile={handleUploadChatFile}
       />
+      )}
 
       {/* Video Player */}
       {activeVideo && (
