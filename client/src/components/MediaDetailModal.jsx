@@ -1,8 +1,8 @@
 import React from 'react';
-import { X, Play, Bookmark, Download, Film, Volume2, HardDrive, Clock, Calendar } from 'lucide-react';
+import { X, Play, Bookmark, Download, Film, Volume2, HardDrive, Clock, Calendar, Share2 } from 'lucide-react';
 import { formatBytes, formatDate, formatDuration, streamUrl } from '../api';
 
-export default function MediaDetailModal({ item, isBookmarked, onToggleBookmark, onPlay, onClose, mode }) {
+export default function MediaDetailModal({ item, isBookmarked, onToggleBookmark, onPlay, onShare, onClose, mode }) {
   if (!item) return null;
 
   const qualityLabel =
@@ -60,15 +60,16 @@ export default function MediaDetailModal({ item, isBookmarked, onToggleBookmark,
           <button type="button" className="btn btn-primary" style={{ padding: '11px 22px' }} onClick={() => onPlay(item)}>
             <Play size={16} fill="#fff" /> PLAY ({qualityLabel})
           </button>
+          {onShare && (
+            <button type="button" className="btn" onClick={() => onShare(item)}>
+              <Share2 size={16} /> Share Link
+            </button>
+          )}
           <button type="button" className="btn" onClick={() => onToggleBookmark(item)}>
             <Bookmark size={16} fill={isBookmarked ? 'currentColor' : 'none'} />
             {isBookmarked ? 'Bookmarked' : 'Bookmark'}
           </button>
-          <a
-            href={streamUrl(item.chatId, item.id, mode, true)}
-            className="btn"
-            style={{ textDecoration: 'none' }}
-          >
+          <a href={streamUrl(item.chatId, item.id, mode, true)} className="btn" style={{ textDecoration: 'none' }}>
             <Download size={16} /> Download
           </a>
         </div>

@@ -9,6 +9,7 @@ import {
   Forward,
   ChevronUp,
   X,
+  Share2,
 } from 'lucide-react';
 import { formatBytes, formatDate, formatDuration } from '../api';
 
@@ -46,6 +47,7 @@ export default function ChatTimelineView({
   onRetry,
   onLoadOlder,
   onOpenMedia,
+  onShareMedia,
   onSendMessage,
   prefs,
   isPlayingSomething,
@@ -307,6 +309,7 @@ export default function ChatTimelineView({
 
                     {/* Footer: Reply button + Timestamp */}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 2 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <button
                         type="button"
                         onClick={() => setReplyTo(msg)}
@@ -324,6 +327,26 @@ export default function ChatTimelineView({
                       >
                         <CornerUpLeft size={11} /> Reply
                       </button>
+                      {media && onShareMedia && (
+                        <button
+                          type="button"
+                          onClick={() => onShareMedia(media)}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--text-muted)',
+                            fontSize: 11,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            padding: 0,
+                          }}
+                        >
+                          <Share2 size={11} /> Share
+                        </button>
+                      )}
+                      </div>
                       <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>{formatTimeOfDay(msg.date)}</span>
                     </div>
                   </div>

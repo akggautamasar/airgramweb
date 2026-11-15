@@ -21,6 +21,9 @@ import {
   Scaling,
   FastForward,
   Rewind,
+  Subtitles,
+  Sun,
+  Upload,
 } from 'lucide-react';
 import { apiFetch, formatDuration, getResumeTime, setResumeTime, streamUrl } from '../api';
 
@@ -55,14 +58,33 @@ const roundBtnStyle = {
   padding: 0,
 };
 
-export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpeed = 1, onClose }) {
+function srtToVtt(srtText) {
+  const vttBody = srtText
+    .replace(/\r+/g, '')
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  return `WEBVTT\n\n${vttBody}`;
+}
+
+export default function VideoPlayerModal({
+  item,
+  mode,
+  onModeChange,
+  defaultSpeed = 1,
+  onClose,
+  customStreamUrl,
+  customPlaylistUrl,
+  isPublicShare = false,
+}) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
+  const subInputRef = useRef(null);
   const hideTimerRef = useRef(null);
   const tapTimerRef = useRef(null);
   const lastTapRef = useRef({ time: 0, side: null });
   const seekFeedbackTimerRef = useRef(null);
+  const gestureHudTimerRef = useRef(null);
   const lastTouchTimeRef = useRef(0);
+  const dragRef = useRef(null);
 
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
@@ -71,31 +93,60 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   const [bufferedEnd, setBufferedEnd] = useState(0);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
+  const [brightness, setBrightness] = useState(1);
+  const [gestureHud, setGestureHud] = useState(null); // { type: 'brightness'|'volume', pct: number }
   const [speed, setSpeed] = useState(defaultSpeed);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [tracksMenuOpen, setTracksMenuOpen] = useState(false);
+  const [audioTracksList, setAudioTracksList] = useState([]);
+  const [textTracksList, setTextTracksList] = useState([]);
+  const [localSubUrl, setLocalSubUrl] = useState('');
+  const [localSubLabel, setLocalSubLabel] = useState('');
   const [vlcInfo, setVlcInfo] = useState(null);
   const [copied, setCopied] = useState(false);
   const [diagSpeed, setDiagSpeed] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
-  const [objectFit, setObjectFit] = useState('contain'); // 'contain' | 'cover'
-  const [seekOverlay, setSeekOverlay] = useState(null); // { side: 'left'|'right', delta: number }
+  const [objectFit, setObjectFit] = useState('contain');
+  const [seekOverlay, setSeekOverlay] = useState(null);
 
-  const src = item ? streamUrl(item.chatId, item.id, mode, false) : '';
+  const src = customStreamUrl || (item ? streamUrl(item.chatId, item.id, mode, false) : '');
 
-  const startHideTimer = (isPlaying = playing, menuOpen = speedMenuOpen) => {
+  const startHideTimer = (isPlaying = playing, anyMenu = speedMenuOpen || tracksMenuOpen) => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-    if (isPlaying && !menuOpen) {
+    if (isPlaying && !anyMenu) {
       hideTimerRef.current = setTimeout(() => {
         setControlsVisible(false);
         setSpeedMenuOpen(false);
+        setTracksMenuOpen(false);
       }, 3500);
     }
   };
 
   const revealControls = (isPlaying = playing) => {
     setControlsVisible(true);
-    startHideTimer(isPlaying, speedMenuOpen);
+    startHideTimer(isPlaying, speedMenuOpen || tracksMenuOpen);
+  };
+
+  const syncTracks = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.audioTracks) {
+      const aList = [];
+      for (let i = 0; i < v.audioTracks.length; i++) {
+        const t = v.audioTracks[i];
+        aList.push({ index: i, label: t.label || t.language || `Audio ${i + 1}`, enabled: t.enabled });
+      }
+      setAudioTracksList(aList);
+    }
+    if (v.textTracks) {
+      const tList = [];
+      for (let i = 0; i < v.textTracks.length; i++) {
+        const t = v.textTracks[i];
+        tList.push({ index: i, label: t.label || t.language || `Subtitle ${i + 1}`, mode: t.mode });
+      }
+      setTextTracksList(tList);
+    }
   };
 
   useEffect(() => {
@@ -107,6 +158,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
         hideTimerRef.current = setTimeout(() => {
           setControlsVisible(false);
           setSpeedMenuOpen(false);
+          setTracksMenuOpen(false);
         }, 3000);
       }
     };
@@ -115,16 +167,17 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   }, [playing]);
 
   useEffect(() => {
-    startHideTimer(playing, speedMenuOpen);
+    startHideTimer(playing, speedMenuOpen || tracksMenuOpen);
     return () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
       if (seekFeedbackTimerRef.current) clearTimeout(seekFeedbackTimerRef.current);
+      if (gestureHudTimerRef.current) clearTimeout(gestureHudTimerRef.current);
     };
-  }, [playing, speedMenuOpen]);
+  }, [playing, speedMenuOpen, tracksMenuOpen]);
 
   useEffect(() => {
-    if (!item) return;
+    if (!item || isPublicShare) return;
     const savedPos = getResumeTime(item.chatId, item.id);
     const v = videoRef.current;
     if (v && savedPos > 5) {
@@ -138,6 +191,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
   }, [item?.chatId, item?.id]);
 
   useEffect(() => {
+    if (isPublicShare) return;
     const t = setInterval(async () => {
       try {
         const d = await apiFetch('/api/diagnostics');
@@ -146,10 +200,10 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
       } catch {}
     }, 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [isPublicShare]);
 
   const handleSwitchMode = (nextMode) => {
-    if (nextMode === mode) return;
+    if (nextMode === mode || !onModeChange) return;
     const v = videoRef.current;
     const pos = v ? v.currentTime : 0;
     const wasPlaying = v ? !v.paused : true;
@@ -190,9 +244,68 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
   };
 
-  // Single tap -> toggle controls (stay >=3.5s, tap again to hide)
-  // Double tap left/right -> -10s / +10s
+  // Vertical swipe gestures: Left = Brightness, Right = Volume
+  const handleSurfaceTouchStart = (e) => {
+    lastTouchTimeRef.current = Date.now();
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const rect = e.currentTarget.getBoundingClientRect();
+    const side = touch.clientX - rect.left < rect.width / 2 ? 'left' : 'right';
+    dragRef.current = {
+      startY: touch.clientY,
+      startX: touch.clientX,
+      side,
+      startBrightness: brightness,
+      startVolume: volume,
+      active: false,
+    };
+  };
+
+  const handleSurfaceTouchMove = (e) => {
+    if (!dragRef.current || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dy = dragRef.current.startY - touch.clientY;
+    const dx = Math.abs(touch.clientX - dragRef.current.startX);
+
+    if (!dragRef.current.active && Math.abs(dy) > 18 && Math.abs(dy) > dx) {
+      dragRef.current.active = true;
+    }
+    if (!dragRef.current.active) return;
+
+    const deltaRatio = dy / 220;
+    if (dragRef.current.side === 'left') {
+      const nextB = Math.max(0.3, Math.min(1.5, dragRef.current.startBrightness + deltaRatio));
+      setBrightness(nextB);
+      setGestureHud({ type: 'brightness', pct: Math.round(((nextB - 0.3) / 1.2) * 100) });
+    } else {
+      const nextV = Math.max(0, Math.min(1, dragRef.current.startVolume + deltaRatio));
+      setVolume(nextV);
+      setMuted(nextV === 0);
+      if (videoRef.current) {
+        videoRef.current.volume = nextV;
+        videoRef.current.muted = nextV === 0;
+      }
+      setGestureHud({ type: 'volume', pct: Math.round(nextV * 100) });
+    }
+
+    if (gestureHudTimerRef.current) clearTimeout(gestureHudTimerRef.current);
+    gestureHudTimerRef.current = setTimeout(() => setGestureHud(null), 900);
+  };
+
+  const handleSurfaceTouchEnd = () => {
+    if (dragRef.current?.active) {
+      // Prevent click handler from firing after a vertical swipe
+      lastTapRef.current = { time: 0, side: null };
+      setTimeout(() => {
+        dragRef.current = null;
+      }, 60);
+    } else {
+      dragRef.current = null;
+    }
+  };
+
   const handleVideoSurfaceClick = (e) => {
+    if (dragRef.current?.active) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const side = e.clientX - rect.left < rect.width / 2 ? 'left' : 'right';
     const now = Date.now();
@@ -214,8 +327,9 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
       lastTapRef.current = { time: now, side };
       if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
       tapTimerRef.current = setTimeout(() => {
-        if (speedMenuOpen) {
+        if (speedMenuOpen || tracksMenuOpen) {
           setSpeedMenuOpen(false);
+          setTracksMenuOpen(false);
           revealControls(playing);
           return;
         }
@@ -226,6 +340,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
             hideTimerRef.current = setTimeout(() => {
               setControlsVisible(false);
               setSpeedMenuOpen(false);
+              setTracksMenuOpen(false);
             }, 3500);
           }
           return next;
@@ -241,7 +356,50 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
     revealControls(playing);
   };
 
+  const handleSelectAudioTrack = (idx) => {
+    const v = videoRef.current;
+    if (!v || !v.audioTracks) return;
+    for (let i = 0; i < v.audioTracks.length; i++) {
+      v.audioTracks[i].enabled = i === idx;
+    }
+    syncTracks();
+  };
+
+  const handleSelectTextTrack = (idx) => {
+    const v = videoRef.current;
+    if (!v || !v.textTracks) return;
+    for (let i = 0; i < v.textTracks.length; i++) {
+      v.textTracks[i].mode = i === idx ? 'showing' : 'disabled';
+    }
+    syncTracks();
+  };
+
+  const handleSubtitleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const raw = await file.text();
+    const vtt = file.name.toLowerCase().endsWith('.srt') ? srtToVtt(raw) : raw;
+    const blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+    setLocalSubUrl(blobUrl);
+    setLocalSubLabel(file.name);
+    setTimeout(() => {
+      syncTracks();
+      const v = videoRef.current;
+      if (v && v.textTracks?.length) {
+        v.textTracks[v.textTracks.length - 1].mode = 'showing';
+        syncTracks();
+      }
+    }, 100);
+    e.target.value = '';
+  };
+
   const handlePlayInVlc = async () => {
+    if (isPublicShare && customStreamUrl) {
+      const fullUrl = new URL(customStreamUrl, window.location.origin).href;
+      setVlcInfo({ directUrl: fullUrl, vlcDeepLink: `vlc://${fullUrl}` });
+      window.location.href = `vlc://${fullUrl}`;
+      return;
+    }
     try {
       const data = await apiFetch(`/api/stream-link/${encodeURIComponent(item.chatId)}/${item.id}?mode=${mode}`);
       setVlcInfo(data);
@@ -293,7 +451,6 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
         lastTouchTimeRef.current = Date.now();
       }}
       onMouseMove={() => {
-        // Ignore synthetic mousemove fired right after a touch tap on mobile
         if (Date.now() - lastTouchTimeRef.current < 600) return;
         revealControls(playing);
       }}
@@ -308,9 +465,20 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
         userSelect: 'none',
       }}
     >
+      <input
+        ref={subInputRef}
+        type="file"
+        accept=".srt,.vtt"
+        style={{ display: 'none' }}
+        onChange={handleSubtitleFile}
+      />
+
       {/* 100% Fullscreen Video Layer */}
       <div
         onClick={handleVideoSurfaceClick}
+        onTouchStart={handleSurfaceTouchStart}
+        onTouchMove={handleSurfaceTouchMove}
+        onTouchEnd={handleSurfaceTouchEnd}
         style={{
           position: 'absolute',
           inset: 0,
@@ -319,6 +487,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          touchAction: 'none',
         }}
       >
         <video
@@ -327,11 +496,13 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           autoPlay
           playsInline
           preload="auto"
+          crossOrigin="use-credentials"
           style={{
             width: '100%',
             height: '100%',
             objectFit,
             background: '#000',
+            filter: `brightness(${brightness})`,
           }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
@@ -341,16 +512,46 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           onLoadedMetadata={(e) => {
             setDuration(e.currentTarget.duration || item.duration || 0);
             e.currentTarget.playbackRate = speed;
+            syncTracks();
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
             setCurrentTime(v.currentTime);
-            setResumeTime(item.chatId, item.id, v.currentTime);
+            if (!isPublicShare) setResumeTime(item.chatId, item.id, v.currentTime);
             if (v.buffered && v.buffered.length > 0) {
               setBufferedEnd(v.buffered.end(v.buffered.length - 1));
             }
           }}
-        />
+        >
+          {localSubUrl && <track kind="subtitles" src={localSubUrl} label={localSubLabel || 'Loaded Subtitles'} default />}
+        </video>
+
+        {/* Brightness / Volume Swipe HUD */}
+        {gestureHud && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '20%',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              background: 'rgba(15, 23, 42, 0.88)',
+              border: '1px solid rgba(255,255,255,0.25)',
+              borderRadius: 999,
+              padding: '9px 18px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 14,
+              fontWeight: 700,
+              pointerEvents: 'none',
+            }}
+          >
+            {gestureHud.type === 'brightness' ? <Sun size={18} color="#fbbf24" /> : <Volume2 size={18} color="#38bdf8" />}
+            <span>
+              {gestureHud.type === 'brightness' ? 'Brightness' : 'Volume'}: {gestureHud.pct}%
+            </span>
+          </div>
+        )}
 
         {/* Double-Tap Seek Feedback Overlay */}
         {seekOverlay && (
@@ -469,61 +670,62 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
               >
                 {qualityBadge}
               </span>
-              <span>Default Audio</span>
               {diagSpeed && <span>· {diagSpeed}</span>}
             </div>
           </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <div
-            style={{
-              display: 'flex',
-              background: 'rgba(15, 23, 42, 0.85)',
-              border: '1px solid rgba(255,255,255,0.2)',
-              borderRadius: 999,
-              padding: 3,
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => handleSwitchMode('telegram_hq')}
+          {onModeChange && (
+            <div
               style={{
                 display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-                padding: '6px 11px',
+                background: 'rgba(15, 23, 42, 0.85)',
+                border: '1px solid rgba(255,255,255,0.2)',
                 borderRadius: 999,
-                border: 'none',
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: 'pointer',
-                background: mode === 'telegram_hq' ? '#f59e0b' : 'transparent',
-                color: mode === 'telegram_hq' ? '#111827' : '#e2e8f0',
+                padding: 3,
               }}
             >
-              <Zap size={13} /> Telegram HQ
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSwitchMode('fast_web')}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-                padding: '6px 11px',
-                borderRadius: 999,
-                border: 'none',
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: 'pointer',
-                background: mode === 'fast_web' ? '#2563eb' : 'transparent',
-                color: mode === 'fast_web' ? '#ffffff' : '#e2e8f0',
-              }}
-            >
-              <Globe size={13} /> Fast Web
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => handleSwitchMode('telegram_hq')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '6px 11px',
+                  borderRadius: 999,
+                  border: 'none',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: mode === 'telegram_hq' ? '#f59e0b' : 'transparent',
+                  color: mode === 'telegram_hq' ? '#111827' : '#e2e8f0',
+                }}
+              >
+                <Zap size={13} /> Telegram HQ
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchMode('fast_web')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '6px 11px',
+                  borderRadius: 999,
+                  border: 'none',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: mode === 'fast_web' ? '#2563eb' : 'transparent',
+                  color: mode === 'fast_web' ? '#ffffff' : '#e2e8f0',
+                }}
+              >
+                <Globe size={13} /> Fast Web
+              </button>
+            </div>
+          )}
 
           <button
             type="button"
@@ -564,13 +766,13 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
               color: '#ffffff',
             }}
           >
-            <span>VLC external stream ready (valid 12h):</span>
+            <span>VLC external stream ready:</span>
             <div style={{ display: 'flex', gap: 8 }}>
               <button type="button" style={iconBtnStyle} onClick={copyDirectLink}>
                 {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? 'Copied URL' : 'Copy Stream URL'}
               </button>
               <a
-                href={`/api/playlist/${encodeURIComponent(item.chatId)}/${item.id}.m3u`}
+                href={customPlaylistUrl || `/api/playlist/${encodeURIComponent(item.chatId)}/${item.id}.m3u`}
                 style={{ ...iconBtnStyle, textDecoration: 'none' }}
               >
                 Download .M3U
@@ -602,6 +804,79 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           transition: 'opacity 0.25s ease',
         }}
       >
+        {/* Audio & Subtitle Tracks Popover */}
+        {tracksMenuOpen && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: 12,
+              borderRadius: 14,
+              background: 'rgba(15, 23, 42, 0.96)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              backdropFilter: 'blur(12px)',
+              maxWidth: 320,
+              marginLeft: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              fontSize: 12.5,
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 6, color: '#93c5fd' }}>Audio Tracks</div>
+              {audioTracksList.length === 0 ? (
+                <div style={{ color: '#94a3b8' }}>Default audio track active</div>
+              ) : (
+                audioTracksList.map((a) => (
+                  <button
+                    key={a.index}
+                    type="button"
+                    onClick={() => handleSelectAudioTrack(a.index)}
+                    style={{
+                      ...iconBtnStyle,
+                      width: '100%',
+                      justifyContent: 'flex-start',
+                      marginBottom: 4,
+                      background: a.enabled ? '#00bfd8' : 'rgba(255,255,255,0.08)',
+                      color: a.enabled ? '#07111f' : '#ffffff',
+                    }}
+                  >
+                    {a.label}
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 6, color: '#93c5fd' }}>Subtitles</div>
+              {textTracksList.map((t) => (
+                <button
+                  key={t.index}
+                  type="button"
+                  onClick={() => handleSelectTextTrack(t.mode === 'showing' ? -1 : t.index)}
+                  style={{
+                    ...iconBtnStyle,
+                    width: '100%',
+                    justifyContent: 'flex-start',
+                    marginBottom: 4,
+                    background: t.mode === 'showing' ? '#00bfd8' : 'rgba(255,255,255,0.08)',
+                    color: t.mode === 'showing' ? '#07111f' : '#ffffff',
+                  }}
+                >
+                  {t.label} {t.mode === 'showing' ? '(On)' : '(Off)'}
+                </button>
+              ))}
+              <button
+                type="button"
+                style={{ ...iconBtnStyle, width: '100%' }}
+                onClick={() => subInputRef.current?.click()}
+              >
+                <Upload size={14} /> Load .SRT / .VTT File
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Speed Picker Popover (0.25x to 4.0x in 0.25x steps) */}
         {speedMenuOpen && (
           <div
@@ -712,6 +987,23 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <button
               type="button"
+              style={{
+                ...roundBtnStyle,
+                background: tracksMenuOpen ? '#00bfd8' : roundBtnStyle.background,
+                color: tracksMenuOpen ? '#07111f' : '#ffffff',
+              }}
+              onClick={() => {
+                syncTracks();
+                setTracksMenuOpen((o) => !o);
+                setSpeedMenuOpen(false);
+                setControlsVisible(true);
+              }}
+              title="Audio & Subtitle Tracks"
+            >
+              <Subtitles size={16} />
+            </button>
+            <button
+              type="button"
               style={iconBtnStyle}
               onClick={() => {
                 setObjectFit((f) => (f === 'contain' ? 'cover' : 'contain'));
@@ -730,6 +1022,7 @@ export default function VideoPlayerModal({ item, mode, onModeChange, defaultSpee
               }}
               onClick={() => {
                 setSpeedMenuOpen((o) => !o);
+                setTracksMenuOpen(false);
                 setControlsVisible(true);
               }}
               title="Playback Speed (0.25x - 4x)"

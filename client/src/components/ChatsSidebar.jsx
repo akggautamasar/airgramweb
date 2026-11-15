@@ -1,25 +1,48 @@
 import React, { useMemo, useState } from 'react';
-import { Bookmark, Search, Radio, Users, User, Bot, Settings } from 'lucide-react';
+import { Bookmark, Search, Radio, Users, User, Bot, Settings, Pin, Archive, Folder } from 'lucide-react';
 
 export default function ChatsSidebar({
   user,
   chats,
+  folders = [],
   selectedChat,
   onSelectChat,
   onOpenSettings,
   loading,
 }) {
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState('all'); // all | saved | channel | group | user
+  const [filter, setFilter] = useState('all'); // all | saved | pinned | archived | channel | group | user | folder:<id>
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const activeFolder = filter.startsWith('folder:')
+      ? folders.find((f) => String(f.id) === filter.slice(7))
+      : null;
+
     return chats.filter((c) => {
-      if (filter !== 'all' && c.type !== filter) return false;
+      if (activeFolder) {
+        const inExplicit = activeFolder.includeIds?.includes(c.id);
+        const byType =
+          (activeFolder.groups && c.type === 'group') ||
+          (activeFolder.broadcasts && c.type === 'channel') ||
+          (activeFolder.bots && c.type === 'bot') ||
+          ((activeFolder.contacts || activeFolder.nonContacts) && c.type === 'user');
+        if (!inExplicit && !byType) return false;
+      } else if (filter === 'pinned') {
+        if (!c.pinned) return false;
+      } else if (filter === 'archived') {
+        if (!c.archived) return false;
+      } else if (filter !== 'all') {
+        if (c.type !== filter) return false;
+      } else {
+        // In 'All', hide archived unless searching
+        if (!q && c.archived) return false;
+      }
+
       if (q && !c.title.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [chats, query, filter]);
+  }, [chats, folders, query, filter]);
 
   const initials = `${(user?.firstName || 'A')[0]}${(user?.lastName || '')[0] || ''}`.toUpperCase();
 
@@ -37,6 +60,9 @@ export default function ChatsSidebar({
         return <User size={16} />;
     }
   };
+
+  const hasArchived = chats.some((c) => c.archived);
+  const hasPinned = chats.some((c) => c.pinned);
 
   return (
     <aside
@@ -94,7 +120,7 @@ export default function ChatsSidebar({
         </div>
       </div>
 
-      {/* Search + Type Filter */}
+      {/* Search + Folders + Type Filter */}
       <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid var(--border)' }}>
         <div style={{ position: 'relative', marginBottom: 10 }}>
           <Search
@@ -114,28 +140,38 @@ export default function ChatsSidebar({
           {[
             { id: 'all', label: 'All' },
             { id: 'saved', label: 'Saved' },
+            ...(hasPinned ? [{ id: 'pinned', label: 'Pinned', icon: Pin }] : []),
+            ...(hasArchived ? [{ id: 'archived', label: 'Archived', icon: Archive }] : []),
             { id: 'channel', label: 'Channels' },
             { id: 'group', label: 'Groups' },
             { id: 'user', label: 'Users' },
-          ].map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              onClick={() => setFilter(f.id)}
-              style={{
-                padding: '4px 9px',
-                borderRadius: 999,
-                fontSize: 11.5,
-                fontWeight: 600,
-                border: '1px solid var(--border)',
-                cursor: 'pointer',
-                background: filter === f.id ? 'var(--primary)' : 'transparent',
-                color: filter === f.id ? '#fff' : 'var(--text-muted)',
-              }}
-            >
-              {f.label}
-            </button>
-          ))}
+            ...folders.map((f) => ({ id: `folder:${f.id}`, label: f.title, icon: Folder })),
+          ].map((f) => {
+            const Icon = f.icon;
+            return (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => setFilter(f.id)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '4px 9px',
+                  borderRadius: 999,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  border: '1px solid var(--border)',
+                  cursor: 'pointer',
+                  background: filter === f.id ? 'var(--primary)' : 'transparent',
+                  color: filter === f.id ? '#fff' : 'var(--text-muted)',
+                }}
+              >
+                {Icon && <Icon size={11} />}
+                {f.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -147,7 +183,7 @@ export default function ChatsSidebar({
           </div>
         ) : filtered.length === 0 ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-            No chats match "{query}"
+            No chats match this filter
           </div>
         ) : (
           filtered.map((chat) => {
@@ -199,9 +235,13 @@ export default function ChatsSidebar({
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
                     }}
                   >
-                    {chat.title}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{chat.title}</span>
+                    {chat.pinned && <Pin size={11} color="var(--cyan)" style={{ flexShrink: 0 }} />}
                   </div>
                   <div
                     style={{

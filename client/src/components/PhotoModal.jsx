@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import { X, Download, Sparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { streamUrl } from '../api';
 
-export default function PhotoModal({ item, onClose }) {
+export default function PhotoModal({ item, onClose, customThumbUrl, customFullUrl, customDownloadUrl }) {
   const [fullQuality, setFullQuality] = useState(false);
   const [zoom, setZoom] = useState(1);
 
   if (!item) return null;
 
   const imgSrc = fullQuality
-    ? `/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}?full=1`
-    : `/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}`;
+    ? customFullUrl || `/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}?full=1`
+    : customThumbUrl || `/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}`;
+
+  const dlUrl = customDownloadUrl || streamUrl(item.chatId, item.id, 'telegram_hq', true);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -54,11 +56,7 @@ export default function PhotoModal({ item, onClose }) {
             <button type="button" className="btn" style={{ padding: 7 }} onClick={() => setZoom((z) => Math.min(3, z + 0.25))}>
               <ZoomIn size={15} />
             </button>
-            <a
-              href={streamUrl(item.chatId, item.id, 'telegram_hq', true)}
-              className="btn"
-              style={{ padding: '6px 12px', fontSize: 12, textDecoration: 'none' }}
-            >
+            <a href={dlUrl} className="btn" style={{ padding: '6px 12px', fontSize: 12, textDecoration: 'none' }}>
               <Download size={14} /> Download
             </a>
             <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={onClose}>

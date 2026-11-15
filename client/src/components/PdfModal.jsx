@@ -12,12 +12,20 @@ import {
   Maximize2,
   ExternalLink,
   HardDrive,
+  Search,
 } from 'lucide-react';
 import { apiFetch, formatBytes, getPdfPage, setPdfPage, streamUrl } from '../api';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-export default function PdfModal({ item, mode = 'fast_web', onClose }) {
+export default function PdfModal({
+  item,
+  mode = 'fast_web',
+  onClose,
+  customPdfUrl,
+  customDownloadUrl,
+  isPublicShare = false,
+}) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const pdfDocRef = useRef(null);
@@ -29,11 +37,19 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState('');
   const [numPages, setNumPages] = useState(0);
-  const [pageNum, setPageNum] = useState(() => (item ? getPdfPage(item.chatId, item.id) : 1));
+  const [pageNum, setPageNum] = useState(() => (item && !isPublicShare ? getPdfPage(item.chatId, item.id) : 1));
   const [pageInput, setPageInput] = useState('1');
   const [scale, setScale] = useState(1.0);
 
-  const pdfUrl = item ? streamUrl(item.chatId, item.id, mode, false) : '';
+  // In-document search state
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [matches, setMatches] = useState([]); // page numbers
+  const [matchIdx, setMatchIdx] = useState(0);
+
+  const pdfUrl = customPdfUrl || (item ? streamUrl(item.chatId, item.id, mode, false) : '');
+  const downloadUrl = customDownloadUrl || (item ? streamUrl(item.chatId, item.id, 'telegram_hq', true) : '');
 
   useEffect(() => {
     if (!item) return;
@@ -43,7 +59,6 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
     setLoadStatus('Streaming PDF via range chunks...');
 
     const loadWithFallback = async () => {
-      // 1. Try fast byte-range streaming first
       try {
         const rangeTask = pdfjsLib.getDocument({
           url: pdfUrl,
@@ -61,14 +76,12 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         }
         pdfDocRef.current = doc;
         setNumPages(doc.numPages);
-        const saved = Math.max(1, Math.min(doc.numPages, getPdfPage(item.chatId, item.id)));
+        const saved = isPublicShare ? 1 : Math.max(1, Math.min(doc.numPages, getPdfPage(item.chatId, item.id)));
         setPageNum(saved);
         setPageInput(String(saved));
         setLoading(false);
         return;
-      } catch {
-        // Fall through to full fetch (BeyondDrive style)
-      }
+      } catch {}
 
       if (cancelled) return;
       setLoadStatus('Loading full PDF...');
@@ -122,7 +135,7 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         }
         pdfDocRef.current = doc;
         setNumPages(doc.numPages);
-        const saved = Math.max(1, Math.min(doc.numPages, getPdfPage(item.chatId, item.id)));
+        const saved = isPublicShare ? 1 : Math.max(1, Math.min(doc.numPages, getPdfPage(item.chatId, item.id)));
         setPageNum(saved);
         setPageInput(String(saved));
         setLoading(false);
@@ -153,7 +166,7 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
     let cancelled = false;
     setRendering(true);
     setPageInput(String(pageNum));
-    setPdfPage(item.chatId, item.id, pageNum);
+    if (!isPublicShare) setPdfPage(item.chatId, item.id, pageNum, doc.numPages);
 
     doc.getPage(pageNum).then((page) => {
       if (cancelled) return;
@@ -198,6 +211,12 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
 
   useEffect(() => {
     const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+      if (e.target.tagName === 'INPUT') return;
       if (e.key === 'ArrowRight' || e.key === 'PageDown') {
         setPageNum((p) => Math.min(numPages || p, p + 1));
       } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
@@ -210,13 +229,46 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [numPages]);
 
+  const handleRunSearch = async (e) => {
+    e.preventDefault();
+    const doc = pdfDocRef.current;
+    const q = searchTerm.trim().toLowerCase();
+    if (!doc || !q) return;
+
+    setSearching(true);
+    const found = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      try {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        const text = content.items.map((it) => it.str).join(' ').toLowerCase();
+        if (text.includes(q)) found.push(i);
+      } catch {}
+    }
+    setMatches(found);
+    setMatchIdx(0);
+    if (found.length > 0) setPageNum(found[0]);
+    setSearching(false);
+  };
+
+  const stepMatch = (dir) => {
+    if (matches.length === 0) return;
+    const next = (matchIdx + dir + matches.length) % matches.length;
+    setMatchIdx(next);
+    setPageNum(matches[next]);
+  };
+
   const openExternal = async (target) => {
     try {
-      const data = await apiFetch(`/api/stream-link/${encodeURIComponent(item.chatId)}/${item.id}?mode=telegram_hq`);
+      let directUrl = new URL(pdfUrl, window.location.origin).href;
+      if (!isPublicShare) {
+        const data = await apiFetch(`/api/stream-link/${encodeURIComponent(item.chatId)}/${item.id}?mode=telegram_hq`);
+        directUrl = data.directUrl;
+      }
       if (target === 'chrome') {
-        window.open(data.directUrl, '_blank', 'noopener');
+        window.open(directUrl, '_blank', 'noopener');
       } else if (target === 'drive') {
-        const driveUrl = `https://drive.google.com/viewerng/viewer?embedded=true&url=${encodeURIComponent(data.directUrl)}`;
+        const driveUrl = `https://drive.google.com/viewerng/viewer?embedded=true&url=${encodeURIComponent(directUrl)}`;
         window.open(driveUrl, '_blank', 'noopener');
       }
     } catch {
@@ -303,6 +355,15 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
           <button
             type="button"
+            className={`btn ${searchOpen ? 'btn-primary' : ''}`}
+            style={{ padding: '6px 8px' }}
+            onClick={() => setSearchOpen((o) => !o)}
+            title="Search in PDF (Ctrl+F)"
+          >
+            <Search size={15} />
+          </button>
+          <button
+            type="button"
             className="btn"
             style={{ padding: '6px 8px' }}
             onClick={() => setScale((s) => Math.max(0.5, Number((s - 0.2).toFixed(2))))}
@@ -322,30 +383,14 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
             <Maximize2 size={14} />
           </button>
 
-          <button
-            type="button"
-            className="btn"
-            style={{ padding: '6px 10px', fontSize: 12 }}
-            onClick={() => openExternal('chrome')}
-            title="Open in Chrome"
-          >
+          <button type="button" className="btn" style={{ padding: '6px 10px', fontSize: 12 }} onClick={() => openExternal('chrome')}>
             <ExternalLink size={13} /> Chrome
           </button>
-          <button
-            type="button"
-            className="btn"
-            style={{ padding: '6px 10px', fontSize: 12 }}
-            onClick={() => openExternal('drive')}
-            title="Open in Google Drive Viewer"
-          >
+          <button type="button" className="btn" style={{ padding: '6px 10px', fontSize: 12 }} onClick={() => openExternal('drive')}>
             <HardDrive size={13} /> Drive
           </button>
 
-          <a
-            href={streamUrl(item.chatId, item.id, 'telegram_hq', true)}
-            className="btn btn-primary"
-            style={{ padding: '6px 11px', fontSize: 12, textDecoration: 'none' }}
-          >
+          <a href={downloadUrl} className="btn btn-primary" style={{ padding: '6px 11px', fontSize: 12, textDecoration: 'none' }}>
             <Download size={14} />
           </a>
           <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={onClose}>
@@ -354,7 +399,49 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
         </div>
       </div>
 
-      {/* Canvas Viewport with Mobile Swipe */}
+      {/* In-Document Search Bar */}
+      {searchOpen && (
+        <form
+          onSubmit={handleRunSearch}
+          style={{
+            padding: '8px 14px',
+            background: 'var(--bg-card)',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
+          <input
+            type="text"
+            className="input"
+            placeholder="Search keyword inside PDF..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            autoFocus
+            style={{ maxWidth: 260, padding: '6px 10px', fontSize: 13 }}
+          />
+          <button type="submit" className="btn btn-primary" style={{ padding: '6px 12px', fontSize: 12.5 }} disabled={searching}>
+            {searching ? <Loader2 size={14} className="spin" /> : 'Find'}
+          </button>
+          {matches.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+              <span>
+                {matchIdx + 1} / {matches.length} pages (p.{matches[matchIdx]})
+              </span>
+              <button type="button" className="btn" style={{ padding: '4px 8px' }} onClick={() => stepMatch(-1)}>
+                Prev
+              </button>
+              <button type="button" className="btn" style={{ padding: '4px 8px' }} onClick={() => stepMatch(1)}>
+                Next
+              </button>
+            </div>
+          )}
+        </form>
+      )}
+
+      {/* Canvas Viewport */}
       <div
         ref={containerRef}
         onTouchStart={(e) => {
@@ -394,7 +481,7 @@ export default function PdfModal({ item, mode = 'fast_web', onClose }) {
               <button type="button" className="btn" onClick={() => openExternal('drive')}>
                 <HardDrive size={14} /> Open in Drive
               </button>
-              <a href={streamUrl(item.chatId, item.id, 'telegram_hq', true)} className="btn btn-primary" style={{ textDecoration: 'none' }}>
+              <a href={downloadUrl} className="btn btn-primary" style={{ textDecoration: 'none' }}>
                 Download PDF
               </a>
             </div>

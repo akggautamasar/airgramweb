@@ -12,6 +12,7 @@ import {
   BookOpen,
   Minus,
   Plus,
+  Search,
 } from 'lucide-react';
 import { formatBytes, getPdfPage, setPdfPage, streamUrl } from '../api';
 
@@ -28,7 +29,14 @@ function sanitizeCSS(css) {
     .replace(/color\s*:\s*(white|#fff|#ffffff|rgba?\([^)]*255[^)]*\))/gi, '');
 }
 
-export default function EpubModal({ item, mode = 'fast_web', onClose }) {
+export default function EpubModal({
+  item,
+  mode = 'fast_web',
+  onClose,
+  customEpubUrl,
+  customDownloadUrl,
+  isPublicShare = false,
+}) {
   const scrollRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -36,15 +44,22 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
   const [rendering, setRendering] = useState(false);
   const [progress, setProgress] = useState({ loaded: 0, total: item?.size || 0 });
   const [error, setError] = useState('');
-  const [spine, setSpine] = useState([]); // [{ path, title }]
+  const [spine, setSpine] = useState([]);
   const [chapterIdx, setChapterIdx] = useState(0);
   const [chapterHtml, setChapterHtml] = useState('');
   const [tocOpen, setTocOpen] = useState(false);
   const [readerTheme, setReaderTheme] = useState('light');
   const [fontSize, setFontSize] = useState(17);
 
-  // Remember chapter using pdfPage storage helper keyed with epub prefix
+  // In-document search state
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [matches, setMatches] = useState([]); // [{ idx, title, snippet }]
+
   const epubStorageId = item ? `epub_${item.id}` : '';
+  const epubUrl = customEpubUrl || (item ? streamUrl(item.chatId, item.id, mode, false) : '');
+  const downloadUrl = customDownloadUrl || (item ? streamUrl(item.chatId, item.id, 'telegram_hq', true) : '');
 
   useEffect(() => {
     if (!item) return;
@@ -53,11 +68,9 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
     setError('');
     setChapterHtml('');
 
-    const url = streamUrl(item.chatId, item.id, mode, false);
-
     (async () => {
       try {
-        const res = await fetch(url, { credentials: 'include' });
+        const res = await fetch(epubUrl, { credentials: 'include' });
         if (!res.ok) throw new Error(`Failed to load EPUB (${res.status})`);
 
         const total = Number(res.headers.get('Content-Length') || item.size || 0);
@@ -125,7 +138,9 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
 
         if (!cancelled) {
           setSpine(spineList);
-          const savedIdx = Math.max(0, Math.min(spineList.length - 1, (getPdfPage(item.chatId, epubStorageId) || 1) - 1));
+          const savedIdx = isPublicShare
+            ? 0
+            : Math.max(0, Math.min(spineList.length - 1, (getPdfPage(item.chatId, epubStorageId) || 1) - 1));
           setChapterIdx(savedIdx);
           setLoading(false);
         }
@@ -140,16 +155,15 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
     return () => {
       cancelled = true;
     };
-  }, [item?.chatId, item?.id]);
+  }, [epubUrl, item?.chatId, item?.id]);
 
-  // Render current chapter into clean HTML (BeyondDrive style: no broken iframe)
   useEffect(() => {
     const zip = zipRef.current;
     if (!zip || spine.length === 0 || loading) return;
 
     let cancelled = false;
     setRendering(true);
-    setPdfPage(item.chatId, epubStorageId, chapterIdx + 1);
+    if (!isPublicShare) setPdfPage(item.chatId, epubStorageId, chapterIdx + 1, spine.length);
 
     (async () => {
       try {
@@ -160,7 +174,6 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
         let html = await file.async('string');
         const dir = chapterPath.includes('/') ? chapterPath.slice(0, chapterPath.lastIndexOf('/') + 1) : '';
 
-        // Inline images as base64 in parallel
         const imgMatches = [...html.matchAll(/src=["']([^"'#?]+)["']/g)];
         await Promise.all(
           imgMatches
@@ -214,6 +227,12 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
 
   useEffect(() => {
     const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+      if (e.target.tagName === 'INPUT') return;
       if (e.key === 'ArrowRight') setChapterIdx((i) => Math.min(spine.length - 1, i + 1));
       else if (e.key === 'ArrowLeft') setChapterIdx((i) => Math.max(0, i - 1));
       else if (e.key === 'Escape') onClose();
@@ -221,6 +240,36 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [spine.length]);
+
+  const handleRunSearch = async (e) => {
+    e.preventDefault();
+    const zip = zipRef.current;
+    const q = searchTerm.trim().toLowerCase();
+    if (!zip || !q) return;
+
+    setSearching(true);
+    const parser = new DOMParser();
+    const results = [];
+    for (let i = 0; i < spine.length; i++) {
+      const f = zip.file(spine[i].path) || zip.file(decodeURIComponent(spine[i].path));
+      if (!f) continue;
+      const html = await f.async('string');
+      const doc = parser.parseFromString(html, 'text/html');
+      const text = (doc.body?.textContent || '').replace(/\s+/g, ' ');
+      const pos = text.toLowerCase().indexOf(q);
+      if (pos !== -1) {
+        const start = Math.max(0, pos - 35);
+        const end = Math.min(text.length, pos + q.length + 55);
+        results.push({
+          idx: i,
+          title: spine[i].title,
+          snippet: (start > 0 ? '...' : '') + text.slice(start, end) + (end < text.length ? '...' : ''),
+        });
+      }
+    }
+    setMatches(results);
+    setSearching(false);
+  };
 
   if (!item) return null;
 
@@ -263,6 +312,15 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className={`btn ${searchOpen ? 'btn-primary' : ''}`}
+            style={{ padding: '6px 8px' }}
+            onClick={() => setSearchOpen((o) => !o)}
+            title="Search in EPUB (Ctrl+F)"
+          >
+            <Search size={15} />
+          </button>
           <button type="button" className="btn" style={{ padding: '6px 8px' }} onClick={() => setFontSize((f) => Math.max(13, f - 1))}>
             <Minus size={14} />
           </button>
@@ -281,11 +339,7 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
             <span>{theme.label}</span>
           </button>
 
-          <a
-            href={streamUrl(item.chatId, item.id, 'telegram_hq', true)}
-            className="btn btn-primary"
-            style={{ padding: '6px 11px', fontSize: 12, textDecoration: 'none' }}
-          >
+          <a href={downloadUrl} className="btn btn-primary" style={{ padding: '6px 11px', fontSize: 12, textDecoration: 'none' }}>
             <Download size={14} />
           </a>
           <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={onClose}>
@@ -294,24 +348,78 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
         </div>
       </div>
 
+      {/* In-Document Search Bar */}
+      {searchOpen && (
+        <div
+          style={{
+            padding: '8px 14px',
+            background: 'var(--bg-card)',
+            color: 'var(--text)',
+            borderBottom: '1px solid var(--border)',
+          }}
+        >
+          <form onSubmit={handleRunSearch} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              className="input"
+              placeholder="Search keyword across chapters..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              autoFocus
+              style={{ maxWidth: 260, padding: '6px 10px', fontSize: 13 }}
+            />
+            <button type="submit" className="btn btn-primary" style={{ padding: '6px 12px', fontSize: 12.5 }} disabled={searching}>
+              {searching ? <Loader2 size={14} className="spin" /> : 'Find'}
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              {matches.length > 0 ? `${matches.length} chapters matched` : ''}
+            </span>
+          </form>
+          {matches.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, overflowX: 'auto', paddingBottom: 2 }}>
+              {matches.map((m) => (
+                <button
+                  key={m.idx}
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: 11.5, padding: '5px 10px', maxWidth: 240, flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}
+                  onClick={() => {
+                    setChapterIdx(m.idx);
+                    setSearchOpen(false);
+                  }}
+                >
+                  <strong>Ch {m.idx + 1}: {m.title}</strong>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>
+                    {m.snippet}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Reader Area */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', overflow: 'hidden' }}>
         {tocOpen && (
           <div
             style={{
+              position: 'absolute',
+              top: 0,
+              bottom: 0,
+              left: 0,
               width: 260,
-              maxWidth: '78vw',
+              maxWidth: '80vw',
               borderRight: '1px solid var(--border)',
               background: 'var(--bg-elevated)',
               color: 'var(--text)',
               overflowY: 'auto',
               padding: 12,
-              zIndex: 5,
+              zIndex: 10,
+              boxShadow: '10px 0 35px rgba(0,0,0,0.55)',
             }}
           >
-            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>
-              Chapters ({spine.length})
-            </div>
+            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Chapters ({spine.length})</div>
             {spine.map((ch, idx) => (
               <button
                 key={idx}
@@ -363,7 +471,7 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
           ) : error ? (
             <div style={{ marginTop: 80, textAlign: 'center', color: '#fca5a5' }}>
               <p>{error}</p>
-              <a href={streamUrl(item.chatId, item.id, 'telegram_hq', true)} className="btn btn-primary" style={{ textDecoration: 'none' }}>
+              <a href={downloadUrl} className="btn btn-primary" style={{ textDecoration: 'none' }}>
                 Download EPUB instead
               </a>
             </div>
@@ -402,7 +510,6 @@ export default function EpubModal({ item, mode = 'fast_web', onClose }) {
                 dangerouslySetInnerHTML={{ __html: chapterHtml }}
               />
 
-              {/* Bottom Chapter Nav */}
               <div
                 style={{
                   width: '100%',
