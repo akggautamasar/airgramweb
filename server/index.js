@@ -51,6 +51,7 @@ async function requireAuth(req, res, next) {
     const session = await tg.getSession(req);
     if (!session) return res.status(401).json({ error: 'Not authenticated' });
     req.tgSession = session;
+    tg.attachRealtimeBackupWatcher(session, backupStore);
     next();
   } catch (err) {
     res.status(401).json({ error: err.message || 'Authentication failed' });
@@ -530,6 +531,13 @@ app.post('/api/backup/config', requireAuth, (req, res) => {
 app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
   try {
     const userId = req.tgSession.user?.id;
+    const forceFull = req.query.full === '1';
+
+    // Pull existing index from Saved Messages first if local store is empty
+    if (backupStore.getConfig(userId).indexedCount === 0) {
+      await tg.loadIndexFromSavedMessages(req.tgSession, backupStore);
+    }
+
     const cfg = backupStore.getConfig(userId);
     const seenChats = new Set();
     let syncedCount = 0;
@@ -539,12 +547,15 @@ app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
       if (!chatId || seenChats.has(chatId)) continue;
       seenChats.add(chatId);
 
+      const minId = forceFull ? 0 : backupStore.getLastSyncedId(userId, chatId);
       let offsetId = 0;
+
       for (let page = 0; page < 500; page++) {
         const batch = await tg.getMediaMessages(req.tgSession, {
           chatId,
           tab: 'all',
           offsetId,
+          minId,
           limit: 80,
         });
         if (!batch.items.length) break;
@@ -565,11 +576,16 @@ app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
         }
         if (!batch.hasMore || !batch.nextOffsetId || batch.nextOffsetId === offsetId) break;
         offsetId = batch.nextOffsetId;
-        await new Promise((r) => setTimeout(r, 120));
+        await new Promise((r) => setTimeout(r, 80));
       }
     }
 
-    res.json({ ok: true, syncedCount, drive: backupStore.getDriveView(userId) });
+    // Persist updated JSON index to Saved Messages
+    if (syncedCount > 0 || !cfg.indexMsgId) {
+      await tg.saveIndexToSavedMessages(req.tgSession, backupStore);
+    }
+
+    res.json({ ok: true, syncedCount, incremental: !forceFull, drive: backupStore.getDriveView(userId) });
   } catch (err) {
     console.error('[AirGram Sync Error]', err);
     res.status(500).json({ error: err.message || 'Sync failed' });
@@ -622,6 +638,7 @@ app.post('/api/backup/upload', requireAuth, upload.single('file'), async (req, r
       miniThumb: msg.media?.miniThumb || null,
     });
 
+    tg.scheduleIndexSave(req.tgSession, backupStore);
     res.json({ ok: true, category, chatId: targetChatId, message: msg });
   } catch (err) {
     console.error('[AirGram Backup Upload Error]', err);
@@ -631,8 +648,12 @@ app.post('/api/backup/upload', requireAuth, upload.single('file'), async (req, r
   }
 });
 
-app.get('/api/backup/drive', requireAuth, (req, res) => {
-  res.json(backupStore.getDriveView(req.tgSession.user?.id));
+app.get('/api/backup/drive', requireAuth, async (req, res) => {
+  const userId = req.tgSession.user?.id;
+  if (backupStore.getConfig(userId).indexedCount === 0) {
+    await tg.loadIndexFromSavedMessages(req.tgSession, backupStore);
+  }
+  res.json(backupStore.getDriveView(userId));
 });
 
 app.get('/api/backup/export.csv', requireAuth, (req, res) => {

@@ -4,6 +4,7 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const { TelegramClient, Api } = require('telegram');
 const { CustomFile } = require('telegram/client/uploads');
+const { NewMessage } = require('telegram/events');
 const { StringSession } = require('telegram/sessions');
 const { computeCheck } = require('telegram/Password');
 
@@ -557,7 +558,7 @@ class TelegramManager {
     return { ...entry, authId: key };
   }
 
-  async getMediaMessages(session, { chatId, tab = 'video', offsetId = 0, limit = 40, query = '' }) {
+  async getMediaMessages(session, { chatId, tab = 'video', offsetId = 0, minId = 0, limit = 40, query = '' }) {
     const filterMap = {
       video: new Api.InputMessagesFilterVideo(),
       audio: new Api.InputMessagesFilterMusic(),
@@ -568,12 +569,14 @@ class TelegramManager {
     const filter = filterMap[tab] || filterMap.video;
     const peer = resolvePeer(session, chatId);
 
-    const msgs = await session.client.getMessages(peer, {
-      limit: Math.min(80, Number(limit) || 40),
+    const opts = {
+      limit: Math.min(100, Number(limit) || 40),
       offsetId: Number(offsetId) || 0,
       filter,
       search: query || undefined,
-    });
+    };
+    if (Number(minId) > 0) opts.minId = Number(minId);
+    const msgs = await session.client.getMessages(peer, opts);
 
     const items = [];
     for (const m of msgs) {
@@ -698,6 +701,120 @@ class TelegramManager {
       fwdFrom: null,
       media: null,
     };
+  }
+
+
+  async loadIndexFromSavedMessages(session, backupStore) {
+    try {
+      const msgs = await session.client.getMessages('me', {
+        search: 'airgram-drive-index.json',
+        limit: 5,
+      });
+      const target = (msgs || []).find((m) => {
+        const attrs = m.media?.document?.attributes || [];
+        return attrs.some((a) => a.fileName === 'airgram-drive-index.json');
+      });
+      if (!target) return { loaded: false };
+      const buf = await session.client.downloadMedia(target, {});
+      if (!buf) return { loaded: false };
+      const parsed = JSON.parse(Buffer.from(buf).toString('utf8'));
+      backupStore.importState(session.user?.id, parsed, target.id);
+      return { loaded: true, msgId: target.id, count: parsed.records?.length || 0 };
+    } catch (err) {
+      console.warn('[AirGram] Could not load Saved Messages index:', err.message);
+      return { loaded: false };
+    }
+  }
+
+  async saveIndexToSavedMessages(session, backupStore) {
+    try {
+      const userId = session.user?.id;
+      const state = backupStore.exportState(userId);
+      const buf = Buffer.from(JSON.stringify(state));
+      const customFile = new CustomFile('airgram-drive-index.json', buf.length, '', buf);
+      const cfg = backupStore.getConfig(userId);
+      const caption = `☁️ AirGram Cloud Drive Index (${state.records.length} files · Auto-Synced)`;
+
+      if (cfg.indexMsgId) {
+        try {
+          await session.client.editMessage('me', {
+            message: cfg.indexMsgId,
+            file: customFile,
+            text: caption,
+          });
+          return { ok: true, msgId: cfg.indexMsgId, updated: true };
+        } catch {
+          // Fall back to sending a fresh file if old message was deleted
+        }
+      }
+
+      const sent = await session.client.sendFile('me', {
+        file: customFile,
+        caption,
+        forceDocument: true,
+      });
+      if (sent?.id) {
+        backupStore.setIndexMsgId(userId, sent.id);
+      }
+      return { ok: true, msgId: sent?.id || null, updated: false };
+    } catch (err) {
+      console.warn('[AirGram] Could not save index to Saved Messages:', err.message);
+      return { ok: false, error: err.message };
+    }
+  }
+
+  scheduleIndexSave(session, backupStore) {
+    if (!this.saveTimers) this.saveTimers = new Map();
+    const uid = String(session.user?.id || session.authId);
+    if (this.saveTimers.has(uid)) clearTimeout(this.saveTimers.get(uid));
+    const t = setTimeout(() => {
+      this.saveTimers.delete(uid);
+      this.saveIndexToSavedMessages(session, backupStore);
+    }, 4500);
+    this.saveTimers.set(uid, t);
+  }
+
+  attachRealtimeBackupWatcher(session, backupStore) {
+    if (!this.watchedClients) this.watchedClients = new Set();
+    if (this.watchedClients.has(session.authId)) return;
+    this.watchedClients.add(session.authId);
+
+    session.client.addEventHandler(async (event) => {
+      try {
+        const m = event.message;
+        if (!m || !m.media) return;
+        let chatId = '';
+        if (m.peerId?.channelId) chatId = `-100${m.peerId.channelId.toString()}`;
+        else if (m.peerId?.chatId) chatId = `-${m.peerId.chatId.toString()}`;
+        else if (m.peerId?.userId) chatId = m.peerId.userId.toString();
+        if (!chatId) return;
+
+        const userId = session.user?.id;
+        const catMap = backupStore.getChannelCategoryMap(userId);
+        const category = catMap[chatId];
+        if (!category) return;
+
+        const meta = extractMediaMeta(m, chatId);
+        if (!meta) return;
+
+        this.messageCache.set(`${session.authId}:${chatId}:${m.id}`, { message: m, meta });
+        const added = backupStore.addRecord(userId, {
+          fileName: meta.fileName,
+          size: meta.size,
+          category,
+          chatId,
+          msgId: m.id,
+          date: m.date,
+          mimeType: meta.mimeType,
+          duration: meta.duration,
+          hasThumb: meta.hasThumb,
+          miniThumb: meta.miniThumb,
+        });
+        if (added) {
+          this.scheduleIndexSave(session, backupStore);
+        }
+      } catch {}
+    }, new NewMessage({}));
   }
 
   async getMessageAndMeta(session, chatId, msgId) {

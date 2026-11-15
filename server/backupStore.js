@@ -98,9 +98,12 @@ class BackupStore {
           other: '',
         },
         captionTemplate: DEFAULT_CAPTION_TEMPLATE,
-        records: [], // [{ sha256, fileName, size, category, chatId, msgId, date, mimeType, duration, hasThumb }]
+        lastSyncedMsgId: {}, // { [chatId]: maxMsgId }
+        indexMsgId: null, // message ID of airgram-drive-index.json in Saved Messages
+        records: [],
       };
     }
+    if (!this.db[uid].lastSyncedMsgId) this.db[uid].lastSyncedMsgId = {};
     return this.db[uid];
   }
 
@@ -110,6 +113,8 @@ class BackupStore {
       channels: b.channels,
       captionTemplate: b.captionTemplate || DEFAULT_CAPTION_TEMPLATE,
       indexedCount: b.records.length,
+      lastSyncedMsgId: b.lastSyncedMsgId || {},
+      indexMsgId: b.indexMsgId || null,
     };
   }
 
@@ -129,11 +134,42 @@ class BackupStore {
     return this.getConfig(userId);
   }
 
+  getChannelCategoryMap(userId) {
+    const b = this.getUserBucket(userId);
+    const map = {};
+    for (const cat of CATEGORIES) {
+      const cid = b.channels[cat];
+      if (cid) map[String(cid)] = cat;
+    }
+    return map;
+  }
+
+  getLastSyncedId(userId, chatId) {
+    const b = this.getUserBucket(userId);
+    return Number(b.lastSyncedMsgId?.[String(chatId)] || 0);
+  }
+
+  setLastSyncedId(userId, chatId, msgId) {
+    const b = this.getUserBucket(userId);
+    const prev = Number(b.lastSyncedMsgId?.[String(chatId)] || 0);
+    if (Number(msgId) > prev) {
+      b.lastSyncedMsgId[String(chatId)] = Number(msgId);
+      this.save();
+    }
+  }
+
+  setIndexMsgId(userId, msgId) {
+    const b = this.getUserBucket(userId);
+    b.indexMsgId = Number(msgId);
+    this.save();
+  }
+
   addRecord(userId, rec) {
     const b = this.getUserBucket(userId);
     const exists = b.records.some(
       (r) => String(r.chatId) === String(rec.chatId) && Number(r.msgId) === Number(rec.msgId)
     );
+    let added = false;
     if (!exists) {
       b.records.unshift({
         sha256: rec.sha256 || '',
@@ -148,16 +184,67 @@ class BackupStore {
         hasThumb: Boolean(rec.hasThumb),
         miniThumb: rec.miniThumb || null,
       });
-      this.save();
+      added = true;
     } else if (rec.sha256) {
       const target = b.records.find(
         (r) => String(r.chatId) === String(rec.chatId) && Number(r.msgId) === Number(rec.msgId)
       );
       if (target && !target.sha256) {
         target.sha256 = rec.sha256;
-        this.save();
       }
     }
+
+    const prevMax = Number(b.lastSyncedMsgId?.[String(rec.chatId)] || 0);
+    if (Number(rec.msgId) > prevMax) {
+      b.lastSyncedMsgId[String(rec.chatId)] = Number(rec.msgId);
+    }
+    this.save();
+    return added;
+  }
+
+  // Export compact JSON (without bulky miniThumb strings) for Saved Messages storage
+  exportState(userId) {
+    const b = this.getUserBucket(userId);
+    return {
+      version: 1,
+      updatedAt: Date.now(),
+      channels: b.channels,
+      captionTemplate: b.captionTemplate,
+      lastSyncedMsgId: b.lastSyncedMsgId || {},
+      records: b.records.map(({ miniThumb, ...rest }) => rest),
+    };
+  }
+
+  importState(userId, remote, indexMsgId = null) {
+    if (!remote || typeof remote !== 'object') return false;
+    const b = this.getUserBucket(userId);
+    if (remote.channels) {
+      for (const cat of CATEGORIES) {
+        if (!b.channels[cat] && remote.channels[cat]) {
+          b.channels[cat] = String(remote.channels[cat]).trim();
+        }
+      }
+    }
+    if (remote.captionTemplate && !b.captionTemplate) {
+      b.captionTemplate = remote.captionTemplate;
+    }
+    if (remote.lastSyncedMsgId) {
+      for (const [cid, mid] of Object.entries(remote.lastSyncedMsgId)) {
+        const cur = Number(b.lastSyncedMsgId[cid] || 0);
+        if (Number(mid) > cur) b.lastSyncedMsgId[cid] = Number(mid);
+      }
+    }
+    const existingKeys = new Set(b.records.map((r) => `${r.chatId}_${r.msgId}`));
+    for (const r of remote.records || []) {
+      const key = `${r.chatId}_${r.msgId}`;
+      if (!existingKeys.has(key)) {
+        existingKeys.add(key);
+        b.records.push(r);
+      }
+    }
+    if (indexMsgId) b.indexMsgId = Number(indexMsgId);
+    this.save();
+    return true;
   }
 
   checkDuplicates(userId, files = []) {
