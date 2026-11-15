@@ -166,7 +166,7 @@ export default function SettingsModal({ prefs, onUpdatePrefs, sessionString, onL
                   >
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {s.meta?.title || s.meta?.fileName || s.id}
+                        {s.isCollection ? `${s.title || 'Shared Folder'} (${s.items?.length || 0} files)` : s.meta?.title || s.meta?.fileName || s.id}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                         <span>{formatBytes(s.meta?.size)}</span>

@@ -10,6 +10,8 @@ import {
   Loader2,
   ExternalLink,
   Clock,
+  Folder,
+  Archive,
 } from 'lucide-react';
 import { apiFetch, formatBytes, formatDuration } from '../api';
 import VideoPlayerModal from './VideoPlayerModal';
@@ -26,7 +28,7 @@ export default function PublicShareView({ shareId }) {
   const [unlockToken, setUnlockToken] = useState('');
   const [mode, setMode] = useState('fast_web');
 
-  const [viewerOpen, setViewerOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(null); // index into items list when viewing
 
   useEffect(() => {
     setLoading(true);
@@ -60,7 +62,7 @@ export default function PublicShareView({ shareId }) {
     return (
       <div style={{ height: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
         <Loader2 size={24} className="spin" color="#00bfd8" />
-        <span>Loading shared file...</span>
+        <span>Loading shared content...</span>
       </div>
     );
   }
@@ -77,16 +79,22 @@ export default function PublicShareView({ shareId }) {
 
   const locked = info.requiresPassword && !unlockToken;
   const stParam = unlockToken ? `&st=${encodeURIComponent(unlockToken)}` : '';
-  const streamSrc = `/api/share/${encodeURIComponent(shareId)}/stream?mode=${mode}${stParam}`;
-  const downloadSrc = `/api/share/${encodeURIComponent(shareId)}/stream?mode=telegram_hq&download=1${stParam}`;
-  const thumbSrc = `/api/share/${encodeURIComponent(shareId)}/thumb${unlockToken ? `?st=${encodeURIComponent(unlockToken)}` : ''}`;
-  const fullThumbSrc = `/api/share/${encodeURIComponent(shareId)}/thumb?full=1${stParam}`;
-  const playlistSrc = `/api/share/${encodeURIComponent(shareId)}/playlist.m3u${unlockToken ? `?st=${encodeURIComponent(unlockToken)}` : ''}`;
+  const stOnly = unlockToken ? `?st=${encodeURIComponent(unlockToken)}` : '';
+  const itemsList = info.isCollection && Array.isArray(info.items) ? info.items : [info.meta];
+  const totalBytes = itemsList.reduce((acc, m) => acc + Number(m.size || 0), 0);
 
-  const meta = info.meta;
-  const isPdf = meta.mimeType === 'application/pdf' || meta.fileName?.toLowerCase().endsWith('.pdf');
-  const isEpub = meta.mimeType === 'application/epub+zip' || meta.fileName?.toLowerCase().endsWith('.epub');
-  const canPreview = meta.kind === 'video' || meta.kind === 'photo' || isPdf || isEpub;
+  const getUrls = (idx) => ({
+    streamSrc: `/api/share/${encodeURIComponent(shareId)}/stream?idx=${idx}&mode=${mode}${stParam}`,
+    downloadSrc: `/api/share/${encodeURIComponent(shareId)}/stream?idx=${idx}&mode=telegram_hq&download=1${stParam}`,
+    thumbSrc: `/api/share/${encodeURIComponent(shareId)}/thumb?idx=${idx}${stParam}`,
+    fullThumbSrc: `/api/share/${encodeURIComponent(shareId)}/thumb?idx=${idx}&full=1${stParam}`,
+    playlistSrc: `/api/share/${encodeURIComponent(shareId)}/playlist.m3u?idx=${idx}${stParam}`,
+  });
+
+  const activeMeta = activeIdx !== null ? itemsList[activeIdx] : null;
+  const activeUrls = activeIdx !== null ? getUrls(activeIdx) : null;
+  const activeIsPdf = activeMeta && (activeMeta.mimeType === 'application/pdf' || activeMeta.fileName?.toLowerCase().endsWith('.pdf'));
+  const activeIsEpub = activeMeta && (activeMeta.mimeType === 'application/epub+zip' || activeMeta.fileName?.toLowerCase().endsWith('.epub'));
 
   return (
     <div
@@ -103,7 +111,7 @@ export default function PublicShareView({ shareId }) {
       <div
         style={{
           width: '100%',
-          maxWidth: 480,
+          maxWidth: info.isCollection ? 680 : 480,
           background: 'var(--bg-elevated)',
           border: '1px solid var(--border)',
           borderRadius: 22,
@@ -111,21 +119,36 @@ export default function PublicShareView({ shareId }) {
           boxShadow: '0 24px 64px rgba(0, 0, 0, 0.45)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
-          <img src="/airgram-icon.svg" alt="AirGram" style={{ width: 34, height: 34, borderRadius: 9 }} />
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 16 }}>AirGram Shared File</div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
-              <Clock size={11} />
-              {info.expiresAt ? `Expires ${new Date(info.expiresAt).toLocaleString()}` : 'Lifetime Access'}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <img src="/airgram-icon.svg" alt="AirGram" style={{ width: 34, height: 34, borderRadius: 9 }} />
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                {info.isCollection ? info.title || 'AirGram Shared Folder' : 'AirGram Shared File'}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <Clock size={11} />
+                {info.expiresAt ? `Expires ${new Date(info.expiresAt).toLocaleString()}` : 'Lifetime Access'}
+                {info.isCollection && ` · ${itemsList.length} files (${formatBytes(totalBytes)})`}
+              </div>
             </div>
           </div>
+
+          {!locked && info.isCollection && (
+            <a
+              href={`/api/share/${encodeURIComponent(shareId)}/zip${stOnly}`}
+              className="btn btn-primary"
+              style={{ textDecoration: 'none', padding: '7px 13px', fontSize: 12.5 }}
+            >
+              <Archive size={14} /> Download All (.zip)
+            </a>
+          )}
         </div>
 
         {locked ? (
           <form onSubmit={handleUnlock} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)', fontSize: 13.5 }}>
-              <Lock size={16} color="#38bdf8" /> This shared file is password protected.
+              <Lock size={16} color="#38bdf8" /> This shared {info.isCollection ? 'folder' : 'file'} is password protected.
             </div>
             {error && <div style={{ color: '#fca5a5', fontSize: 13 }}>{error}</div>}
             <input
@@ -137,112 +160,131 @@ export default function PublicShareView({ shareId }) {
               required
             />
             <button type="submit" className="btn btn-primary" disabled={unlocking}>
-              {unlocking ? <Loader2 size={16} className="spin" /> : 'Unlock File'}
+              {unlocking ? <Loader2 size={16} className="spin" /> : 'Unlock'}
             </button>
           </form>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div
-              style={{
-                padding: 16,
-                borderRadius: 14,
-                background: 'var(--bg-card)',
-                border: '1px solid var(--border)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 14,
-              }}
-            >
-              <div
-                style={{
-                  width: 48,
-                  height: 48,
-                  borderRadius: 12,
-                  background: 'linear-gradient(135deg, #2563eb, #00bfd8)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: '#fff',
-                  flexShrink: 0,
-                }}
-              >
-                {meta.kind === 'video' ? <Film size={22} /> : meta.kind === 'audio' ? <Music size={22} /> : meta.kind === 'photo' ? <ImageIcon size={22} /> : <FileText size={22} />}
-              </div>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 14.5, wordBreak: 'break-word' }}>{meta.title || meta.fileName}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
-                  {formatBytes(meta.size)}
-                  {meta.duration > 0 ? ` · ${formatDuration(meta.duration)}` : ''}
-                </div>
-              </div>
-            </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: '70vh', overflowY: 'auto' }}>
+            {itemsList.map((meta, idx) => {
+              const urls = getUrls(idx);
+              const isPdf = meta.mimeType === 'application/pdf' || meta.fileName?.toLowerCase().endsWith('.pdf');
+              const isEpub = meta.mimeType === 'application/epub+zip' || meta.fileName?.toLowerCase().endsWith('.epub');
+              const canPreview = meta.kind === 'video' || meta.kind === 'photo' || isPdf || isEpub;
 
-            {meta.kind === 'audio' && (
-              <audio controls src={streamSrc} style={{ width: '100%' }} />
-            )}
-
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {canPreview && (
-                <button type="button" className="btn btn-primary" style={{ flex: 1 }} onClick={() => setViewerOpen(true)}>
-                  <Play size={15} fill="#fff" /> {meta.kind === 'video' ? 'Stream Video' : isPdf ? 'Open PDF' : isEpub ? 'Read EPUB' : 'View Photo'}
-                </button>
-              )}
-              <a href={downloadSrc} className="btn" style={{ flex: canPreview ? undefined : 1, textDecoration: 'none' }}>
-                <Download size={15} /> Download
-              </a>
-              {meta.kind === 'video' && (
-                <a
-                  href={`vlc://${new URL(streamSrc, window.location.origin).href}`}
-                  className="btn btn-amber"
-                  style={{ textDecoration: 'none' }}
+              return (
+                <div
+                  key={`${meta.chatId}_${meta.id}_${idx}`}
+                  style={{
+                    padding: 14,
+                    borderRadius: 14,
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                  }}
                 >
-                  <ExternalLink size={14} /> VLC
-                </a>
-              )}
-            </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div
+                      style={{
+                        width: 42,
+                        height: 42,
+                        borderRadius: 11,
+                        background: 'linear-gradient(135deg, #2563eb, #00bfd8)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#fff',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {meta.kind === 'video' ? (
+                        <Film size={20} />
+                      ) : meta.kind === 'audio' ? (
+                        <Music size={20} />
+                      ) : meta.kind === 'photo' ? (
+                        <ImageIcon size={20} />
+                      ) : (
+                        <FileText size={20} />
+                      )}
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, wordBreak: 'break-word' }}>{meta.title || meta.fileName}</div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                        {formatBytes(meta.size)}
+                        {meta.duration > 0 ? ` · ${formatDuration(meta.duration)}` : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  {meta.kind === 'audio' && <audio controls src={urls.streamSrc} style={{ width: '100%' }} />}
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {canPreview && (
+                      <button type="button" className="btn btn-primary" style={{ flex: 1, padding: '7px 12px', fontSize: 12.5 }} onClick={() => setActiveIdx(idx)}>
+                        <Play size={14} fill="#fff" />{' '}
+                        {meta.kind === 'video' ? 'Stream Video' : isPdf ? 'Open PDF' : isEpub ? 'Read EPUB' : 'View Photo'}
+                      </button>
+                    )}
+                    <a href={urls.downloadSrc} className="btn" style={{ padding: '7px 12px', fontSize: 12.5, textDecoration: 'none' }}>
+                      <Download size={14} /> Download
+                    </a>
+                    {meta.kind === 'video' && (
+                      <a
+                        href={`vlc://${new URL(urls.streamSrc, window.location.origin).href}`}
+                        className="btn btn-amber"
+                        style={{ padding: '7px 12px', fontSize: 12.5, textDecoration: 'none' }}
+                      >
+                        <ExternalLink size={13} /> VLC
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Inline Viewers for Public Share */}
-      {viewerOpen && meta.kind === 'video' && (
+      {/* Inline Viewers */}
+      {activeMeta && activeUrls && activeMeta.kind === 'video' && (
         <VideoPlayerModal
-          item={meta}
+          item={activeMeta}
           mode={mode}
           onModeChange={setMode}
-          onClose={() => setViewerOpen(false)}
-          customStreamUrl={streamSrc}
-          customPlaylistUrl={playlistSrc}
+          onClose={() => setActiveIdx(null)}
+          customStreamUrl={activeUrls.streamSrc}
+          customPlaylistUrl={activeUrls.playlistSrc}
           isPublicShare
         />
       )}
-      {viewerOpen && isPdf && (
+      {activeMeta && activeUrls && activeIsPdf && (
         <PdfModal
-          item={meta}
+          item={activeMeta}
           mode={mode}
-          onClose={() => setViewerOpen(false)}
-          customPdfUrl={streamSrc}
-          customDownloadUrl={downloadSrc}
+          onClose={() => setActiveIdx(null)}
+          customPdfUrl={activeUrls.streamSrc}
+          customDownloadUrl={activeUrls.downloadSrc}
           isPublicShare
         />
       )}
-      {viewerOpen && isEpub && (
+      {activeMeta && activeUrls && activeIsEpub && (
         <EpubModal
-          item={meta}
+          item={activeMeta}
           mode={mode}
-          onClose={() => setViewerOpen(false)}
-          customEpubUrl={streamSrc}
-          customDownloadUrl={downloadSrc}
+          onClose={() => setActiveIdx(null)}
+          customEpubUrl={activeUrls.streamSrc}
+          customDownloadUrl={activeUrls.downloadSrc}
           isPublicShare
         />
       )}
-      {viewerOpen && meta.kind === 'photo' && (
+      {activeMeta && activeUrls && activeMeta.kind === 'photo' && (
         <PhotoModal
-          item={meta}
-          onClose={() => setViewerOpen(false)}
-          customThumbUrl={thumbSrc}
-          customFullUrl={fullThumbSrc}
-          customDownloadUrl={downloadSrc}
+          item={activeMeta}
+          onClose={() => setActiveIdx(null)}
+          customThumbUrl={activeUrls.thumbSrc}
+          customFullUrl={activeUrls.fullThumbSrc}
+          customDownloadUrl={activeUrls.downloadSrc}
         />
       )}
     </div>

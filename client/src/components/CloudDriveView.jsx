@@ -26,6 +26,7 @@ import {
   LayoutGrid,
   List,
   ArrowUpDown,
+  Link2,
 } from 'lucide-react';
 import { apiFetch, formatBytes, formatDate, formatDuration, streamUrl } from '../api';
 
@@ -80,6 +81,11 @@ export default function CloudDriveView({
   const [selectedKeys, setSelectedKeys] = useState(new Set());
   const [zipping, setZipping] = useState(false);
   const [versionModalItem, setVersionModalItem] = useState(null);
+  const [urlModalOpen, setUrlModalOpen] = useState(false);
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [remoteName, setRemoteName] = useState('');
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [urlMsg, setUrlMsg] = useState('');
 
   // Scanner & Live Upload Queue State
   const [scanning, setScanning] = useState(false);
@@ -308,6 +314,32 @@ export default function CloudDriveView({
     });
   };
 
+
+  const handleRemoteUrlUpload = async (e) => {
+    e.preventDefault();
+    if (!remoteUrl.trim() || urlBusy) return;
+    setUrlBusy(true);
+    setUrlMsg('');
+    try {
+      const res = await apiFetch('/api/backup/upload-url', {
+        method: 'POST',
+        body: JSON.stringify({ url: remoteUrl.trim(), customFileName: remoteName.trim() }),
+      });
+      if (res.skipped) {
+        setUrlMsg(`Skipped: ${res.fileName} is already in your Cloud Drive.`);
+      } else {
+        setUrlMsg(`Uploaded ${res.fileName} (${formatBytes(res.size)}) to ${res.category}!`);
+        setRemoteUrl('');
+        setRemoteName('');
+        apiFetch('/api/backup/drive').then(setDrive).catch(() => {});
+      }
+    } catch (err) {
+      setUrlMsg(`Error: ${err.message}`);
+    } finally {
+      setUrlBusy(false);
+    }
+  };
+
   const handleBulkZip = async () => {
     if (selectedKeys.size === 0 || zipping) return;
     setZipping(true);
@@ -435,6 +467,9 @@ export default function CloudDriveView({
           </button>
           <button type="button" className="btn" onClick={() => filesInputRef.current?.click()} disabled={scanning}>
             <Upload size={15} /> Upload Files
+          </button>
+          <button type="button" className="btn" onClick={() => { setUrlMsg(''); setUrlModalOpen(true); }} title="Fetch & upload a direct file URL on your Oracle server">
+            <Link2 size={15} /> URL Upload
           </button>
           <button type="button" className="btn" onClick={() => handleSyncChannels(false)} disabled={syncing} title="Fetch ALL files from your 7 Telegram channels">
             <RefreshCw size={15} className={syncing ? 'spin' : ''} />
@@ -664,10 +699,24 @@ export default function CloudDriveView({
             )}
 
             {selectedKeys.size > 0 && (
-              <button type="button" className="btn btn-primary" onClick={handleBulkZip} disabled={zipping}>
-                {zipping ? <Loader2 size={15} className="spin" /> : <Archive size={15} />}
-                Zip ({selectedKeys.size})
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    const selectedList = (drive.items || []).filter((it) =>
+                      selectedKeys.has(`${it.chatId}_${it.id}`)
+                    );
+                    onShareItem({ isCollection: true, items: selectedList });
+                  }}
+                >
+                  <Share2 size={15} /> Share ({selectedKeys.size})
+                </button>
+                <button type="button" className="btn btn-primary" onClick={handleBulkZip} disabled={zipping}>
+                  {zipping ? <Loader2 size={15} className="spin" /> : <Archive size={15} />}
+                  Zip ({selectedKeys.size})
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -900,6 +949,63 @@ export default function CloudDriveView({
           </div>
         )}
       </div>
+
+
+      {/* Remote URL-to-Telegram Uploader Modal */}
+      {urlModalOpen && (
+        <div className="modal-backdrop" onClick={() => !urlBusy && setUrlModalOpen(false)}>
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleRemoteUrlUpload}
+            style={{
+              width: '100%',
+              maxWidth: 460,
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border)',
+              borderRadius: 20,
+              padding: 24,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Link2 size={17} color="#00bfd8" /> Remote URL Uploader
+              </h3>
+              <button type="button" className="btn btn-ghost" style={{ padding: 6 }} disabled={urlBusy} onClick={() => setUrlModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p style={{ margin: 0, fontSize: 12.5, color: 'var(--text-muted)' }}>
+              Paste any direct <code>.pdf</code>, <code>.epub</code>, <code>.mp4</code>, or archive URL. Your Oracle server fetches and uploads it straight to the matching Telegram channel without using your phone&apos;s data.
+            </p>
+            <input
+              type="url"
+              className="input"
+              placeholder="https://example.com/lecture.mp4"
+              value={remoteUrl}
+              onChange={(e) => setRemoteUrl(e.target.value)}
+              required
+            />
+            <input
+              type="text"
+              className="input"
+              placeholder="Custom file name (optional)"
+              value={remoteName}
+              onChange={(e) => setRemoteName(e.target.value)}
+            />
+            {urlMsg && (
+              <div style={{ fontSize: 12.5, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
+                {urlMsg}
+              </div>
+            )}
+            <button type="submit" className="btn btn-primary" disabled={urlBusy}>
+              {urlBusy ? <><Loader2 size={15} className="spin" /> Fetching & Uploading...</> : 'Upload to Telegram'}
+            </button>
+          </form>
+        </div>
+      )}
 
       {/* 7-Channel Config Modal */}
       {configOpen && (

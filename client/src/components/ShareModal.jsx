@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Share2, Lock, Clock, Copy, Check, ExternalLink, Loader2 } from 'lucide-react';
+import { X, Share2, Lock, Clock, Copy, Check, ExternalLink, Loader2, Folder } from 'lucide-react';
 import { apiFetch, formatBytes } from '../api';
 
 const EXPIRY_OPTIONS = [
@@ -11,6 +11,10 @@ const EXPIRY_OPTIONS = [
 ];
 
 export default function ShareModal({ item, onClose }) {
+  const isCollection = Boolean(item?.isCollection && Array.isArray(item?.items));
+  const [title, setTitle] = useState(
+    isCollection ? `Shared Folder (${item.items.length} files)` : ''
+  );
   const [password, setPassword] = useState('');
   const [expiresInHours, setExpiresInHours] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -20,19 +24,32 @@ export default function ShareModal({ item, onClose }) {
 
   if (!item) return null;
 
+  const totalSize = isCollection
+    ? item.items.reduce((acc, x) => acc + Number(x.size || 0), 0)
+    : item.size;
+
   const handleCreate = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError('');
     try {
+      const payload = isCollection
+        ? {
+            items: item.items.map((x) => ({ chatId: x.chatId, msgId: x.id })),
+            title: title.trim() || `Shared Folder (${item.items.length} files)`,
+            password: password.trim(),
+            expiresInHours: Number(expiresInHours),
+          }
+        : {
+            chatId: item.chatId,
+            msgId: item.id,
+            password: password.trim(),
+            expiresInHours: Number(expiresInHours),
+          };
+
       const data = await apiFetch('/api/share', {
         method: 'POST',
-        body: JSON.stringify({
-          chatId: item.chatId,
-          msgId: item.id,
-          password: password.trim(),
-          expiresInHours: Number(expiresInHours),
-        }),
+        body: JSON.stringify(payload),
       });
       setCreated(data);
     } catch (err) {
@@ -65,7 +82,9 @@ export default function ShareModal({ item, onClose }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Share2 size={18} color="#00bfd8" />
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Share File Link</h2>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>
+              {isCollection ? 'Share Folder / Collection' : 'Share File Link'}
+            </h2>
           </div>
           <button type="button" className="btn btn-ghost" style={{ padding: 7 }} onClick={onClose}>
             <X size={18} />
@@ -82,10 +101,10 @@ export default function ShareModal({ item, onClose }) {
           }}
         >
           <div style={{ fontWeight: 700, fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {item.title || item.fileName}
+            {isCollection ? `${item.items.length} selected files` : item.title || item.fileName}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-            {item.kind.toUpperCase()} · {formatBytes(item.size)}
+            {isCollection ? 'COLLECTION' : item.kind.toUpperCase()} · {formatBytes(totalSize)}
           </div>
         </div>
 
@@ -106,6 +125,21 @@ export default function ShareModal({ item, onClose }) {
 
         {!created ? (
           <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {isCollection && (
+              <div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 6 }}>
+                  <Folder size={13} /> Folder / Playlist Title
+                </label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="e.g. Power Electronics Lectures"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+              </div>
+            )}
+
             <div>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 6 }}>
                 <Lock size={13} /> Password Protection (Optional)
@@ -143,7 +177,8 @@ export default function ShareModal({ item, onClose }) {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-              Anyone with this link can stream, view, or download this file
+              Anyone with this link can stream, view, or download{' '}
+              {isCollection ? 'all files in this folder' : 'this file'}
               {created.requiresPassword ? ' after entering your password' : ''}.
             </div>
             <input
