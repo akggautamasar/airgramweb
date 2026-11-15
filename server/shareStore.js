@@ -46,6 +46,27 @@ function verifyPassword(pwd, stored) {
   return crypto.timingSafeEqual(test, Buffer.from(hash, 'hex'));
 }
 
+function pickMetaFields(meta, chatId) {
+  return {
+    id: meta.id,
+    chatId: String(chatId || meta.chatId),
+    kind: meta.kind,
+    fileName: meta.fileName,
+    mimeType: meta.mimeType,
+    size: meta.size,
+    duration: meta.duration,
+    width: meta.width,
+    height: meta.height,
+    title: meta.title,
+    performer: meta.performer,
+    date: meta.date,
+    caption: meta.caption,
+    hasThumb: meta.hasThumb,
+    miniThumb: meta.miniThumb,
+    streamable: meta.streamable,
+  };
+}
+
 class ShareStore {
   constructor() {
     ensureDir();
@@ -66,34 +87,23 @@ class ShareStore {
     fs.writeFileSync(SHARES_FILE, JSON.stringify(this.shares, null, 2));
   }
 
-  createShare({ ownerId, chatId, msgId, meta, sessionString, password, expiresInHours }) {
+  createShare({ ownerId, chatId, msgId, meta, items, title, sessionString, password, expiresInHours }) {
     const id = crypto.randomBytes(6).toString('base64url');
     const hrs = Number(expiresInHours || 0);
-    const expiresAt = hrs > 0 ? Date.now() + hrs * 3600 * 1000 : null; // null = Lifetime
+    const expiresAt = hrs > 0 ? Date.now() + hrs * 3600 * 1000 : null;
+
+    const isCollection = Array.isArray(items) && items.length > 0;
+    const cleanItems = isCollection ? items.map((m) => pickMetaFields(m, m.chatId)) : null;
 
     this.shares[id] = {
       id,
       ownerId: String(ownerId || ''),
-      chatId: String(chatId),
-      msgId: Number(msgId),
-      meta: {
-        id: meta.id,
-        chatId: String(chatId),
-        kind: meta.kind,
-        fileName: meta.fileName,
-        mimeType: meta.mimeType,
-        size: meta.size,
-        duration: meta.duration,
-        width: meta.width,
-        height: meta.height,
-        title: meta.title,
-        performer: meta.performer,
-        date: meta.date,
-        caption: meta.caption,
-        hasThumb: meta.hasThumb,
-        miniThumb: meta.miniThumb,
-        streamable: meta.streamable,
-      },
+      isCollection,
+      title: isCollection ? String(title || `Shared Folder (${cleanItems.length} files)`) : null,
+      chatId: isCollection ? null : String(chatId),
+      msgId: isCollection ? null : Number(msgId),
+      meta: isCollection ? cleanItems[0] : pickMetaFields(meta, chatId),
+      items: cleanItems,
       passwordHash: password && String(password).trim() ? hashPassword(String(password).trim()) : null,
       encryptedSession: encryptString(sessionString),
       createdAt: Date.now(),
@@ -114,6 +124,16 @@ class ShareStore {
     return entry;
   }
 
+  getItemMeta(id, idx = 0) {
+    const entry = this.getRaw(id);
+    if (!entry) return null;
+    if (entry.isCollection && Array.isArray(entry.items)) {
+      const i = Math.max(0, Math.min(entry.items.length - 1, Number(idx) || 0));
+      return entry.items[i] || null;
+    }
+    return entry.meta;
+  }
+
   getSessionString(id) {
     const entry = this.getRaw(id);
     if (!entry) return null;
@@ -125,7 +145,6 @@ class ShareStore {
     if (!entry) return false;
     return verifyPassword(password, entry.passwordHash);
   }
-
 
   listByOwner(ownerId) {
     const now = Date.now();
@@ -159,10 +178,13 @@ class ShareStore {
     if (!entry) return null;
     return {
       id: entry.id,
+      isCollection: Boolean(entry.isCollection),
+      title: entry.title || null,
       requiresPassword: Boolean(entry.passwordHash),
       expiresAt: entry.expiresAt,
       createdAt: entry.createdAt,
       meta: entry.meta,
+      items: entry.items || null,
     };
   }
 }

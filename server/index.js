@@ -382,21 +382,38 @@ app.delete('/api/shares/:id', requireAuth, (req, res) => {
 
 app.post('/api/share', requireAuth, async (req, res) => {
   try {
-    const { chatId, msgId, password = '', expiresInHours = 0 } = req.body;
-    if (!chatId || !msgId) return res.status(400).json({ error: 'chatId and msgId are required' });
+    const { chatId, msgId, items, title = '', password = '', expiresInHours = 0 } = req.body;
+    let share;
 
-    const entry = await tg.getMessageAndMeta(req.tgSession, chatId, msgId);
-    if (!entry) return res.status(404).json({ error: 'File not found' });
-
-    const share = shareStore.createShare({
-      ownerId: req.tgSession.user?.id,
-      chatId,
-      msgId,
-      meta: entry.meta,
-      sessionString: req.tgSession.sessionString,
-      password,
-      expiresInHours,
-    });
+    if (Array.isArray(items) && items.length > 0) {
+      const resolvedMetas = [];
+      for (const it of items.slice(0, 100)) {
+        const entry = await tg.getMessageAndMeta(req.tgSession, it.chatId, it.msgId);
+        if (entry) resolvedMetas.push(entry.meta);
+      }
+      if (resolvedMetas.length === 0) return res.status(404).json({ error: 'No valid files found to share' });
+      share = shareStore.createShare({
+        ownerId: req.tgSession.user?.id,
+        items: resolvedMetas,
+        title,
+        sessionString: req.tgSession.sessionString,
+        password,
+        expiresInHours,
+      });
+    } else {
+      if (!chatId || !msgId) return res.status(400).json({ error: 'chatId and msgId are required' });
+      const entry = await tg.getMessageAndMeta(req.tgSession, chatId, msgId);
+      if (!entry) return res.status(404).json({ error: 'File not found' });
+      share = shareStore.createShare({
+        ownerId: req.tgSession.user?.id,
+        chatId,
+        msgId,
+        meta: entry.meta,
+        sessionString: req.tgSession.sessionString,
+        password,
+        expiresInHours,
+      });
+    }
 
     const proto = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
@@ -452,7 +469,9 @@ app.all('/api/share/:id/stream', async (req, res) => {
     if (!sessionStr) return res.status(404).json({ error: 'Share session unavailable' });
 
     const shareSession = await tg.getOrReconnectShareClient(shareId, sessionStr);
-    const entry = await tg.getMessageAndMeta(shareSession, access.info.meta.chatId, access.info.meta.id);
+    const targetMeta = shareStore.getItemMeta(shareId, req.query.idx || 0);
+    if (!targetMeta) return res.status(404).json({ error: 'Shared item not found' });
+    const entry = await tg.getMessageAndMeta(shareSession, targetMeta.chatId, targetMeta.id);
     if (!entry) return res.status(404).json({ error: 'Shared file no longer exists on Telegram' });
 
     const mode = req.query.mode === STREAMING_MODES.TELEGRAM_HQ ? STREAMING_MODES.TELEGRAM_HQ : STREAMING_MODES.FAST_WEB;
@@ -481,10 +500,12 @@ app.get('/api/share/:id/thumb', async (req, res) => {
 
     const sessionStr = shareStore.getSessionString(shareId);
     const shareSession = await tg.getOrReconnectShareClient(shareId, sessionStr);
+    const targetMeta = shareStore.getItemMeta(shareId, req.query.idx || 0);
+    if (!targetMeta) return res.status(404).end();
     const buf = await tg.downloadThumbnail(
       shareSession,
-      access.info.meta.chatId,
-      access.info.meta.id,
+      targetMeta.chatId,
+      targetMeta.id,
       req.query.full === '1'
     );
     if (!buf) return res.status(404).end();
@@ -493,6 +514,40 @@ app.get('/api/share/:id/thumb', async (req, res) => {
     res.send(buf);
   } catch {
     res.status(404).end();
+  }
+});
+
+
+app.get('/api/share/:id/zip', async (req, res) => {
+  try {
+    const shareId = req.params.id;
+    const access = verifyShareAccess(req, shareId);
+    if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+    const sessionStr = shareStore.getSessionString(shareId);
+    const shareSession = await tg.getOrReconnectShareClient(shareId, sessionStr);
+    const list = access.info.items || [access.info.meta];
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="airgram-shared-bundle.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 1 } });
+    archive.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+    archive.pipe(res);
+
+    const usedNames = new Set();
+    for (const m of list.slice(0, 50)) {
+      const entry = await tg.getMessageAndMeta(shareSession, m.chatId, m.id);
+      if (!entry) continue;
+      let name = (entry.meta.fileName || `file_${m.id}`).replace(/[\\/:*?"<>|]/g, '_');
+      while (usedNames.has(name)) name = `${m.id}_${name}`;
+      usedNames.add(name);
+      const buf = await shareSession.client.downloadMedia(entry.message, {});
+      if (buf) archive.append(Buffer.isBuffer(buf) ? buf : Buffer.from(buf), { name });
+    }
+    await archive.finalize();
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
@@ -609,6 +664,104 @@ app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
 app.post('/api/backup/check-duplicates', requireAuth, (req, res) => {
   const results = backupStore.checkDuplicates(req.tgSession.user?.id, req.body?.files || []);
   res.json({ results });
+});
+
+
+app.post('/api/backup/upload-url', requireAuth, async (req, res) => {
+  const { url = '', customFileName = '' } = req.body || {};
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(url).trim());
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('Invalid protocol');
+  } catch {
+    return res.status(400).json({ error: 'Please enter a valid http:// or https:// URL' });
+  }
+
+  const tmpPath = path.join(os.tmpdir(), 'airgram_uploads', `remote_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+  fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+
+  try {
+    const resp = await fetch(parsedUrl.href, { redirect: 'follow' });
+    if (!resp.ok) return res.status(502).json({ error: `Remote server returned HTTP ${resp.status}` });
+
+    const cd = resp.headers.get('content-disposition') || '';
+    let cdName = '';
+    const mStar = cd.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+    const mPlain = cd.match(/filename=["']?([^;"'\r\n]+)["']?/i);
+    if (mStar) cdName = decodeURIComponent(mStar[1].trim().replace(/^["']|["']$/g, ''));
+    else if (mPlain) cdName = mPlain[1].trim();
+
+    const urlBase = decodeURIComponent(parsedUrl.pathname.split('/').pop() || '');
+    const fileName = String(customFileName || cdName || urlBase || `remote_${Date.now()}.bin`).trim();
+    const mimeType = (resp.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
+
+    const cryptoMod = require('crypto');
+    const hash = cryptoMod.createHash('sha256');
+    const ws = fs.createWriteStream(tmpPath);
+    let totalBytes = 0;
+
+    const reader = resp.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buf = Buffer.from(value);
+      totalBytes += buf.length;
+      hash.update(buf);
+      if (!ws.write(buf)) {
+        await new Promise((r) => ws.once('drain', r));
+      }
+    }
+    await new Promise((r) => ws.end(r));
+
+    const sha256 = hash.digest('hex');
+    const userId = req.tgSession.user?.id;
+    const dupCheck = backupStore.checkDuplicates(userId, [{ name: fileName, size: totalBytes, sha256 }]);
+    if (dupCheck[0]?.alreadyUploaded) {
+      return res.json({ ok: true, skipped: true, reason: 'Already exists in your Cloud Drive', fileName, size: totalBytes });
+    }
+
+    const cfg = backupStore.getConfig(userId);
+    const category = categorizeFile(fileName, mimeType, '');
+    const targetChatId = cfg.channels[category] || req.tgSession.user?.id;
+    const ext = fileName.includes('.') ? fileName.split('.').pop() : '';
+    const caption = formatCaption(cfg.captionTemplate, {
+      name: fileName,
+      category,
+      size: humanSize(totalBytes),
+      date: new Date().toISOString().slice(0, 10),
+      ext,
+    });
+
+    const msg = await tg.sendChatFile(req.tgSession, {
+      chatId: targetChatId,
+      filePath: tmpPath,
+      originalName: fileName,
+      mimeType,
+      caption,
+    });
+
+    backupStore.addRecord(userId, {
+      sha256,
+      fileName,
+      size: totalBytes,
+      category,
+      chatId: targetChatId,
+      msgId: msg.id,
+      date: msg.date,
+      mimeType,
+      duration: msg.media?.duration || 0,
+      hasThumb: Boolean(msg.media?.hasThumb),
+      miniThumb: msg.media?.miniThumb || null,
+    });
+
+    tg.scheduleIndexSave(req.tgSession, backupStore);
+    res.json({ ok: true, skipped: false, category, chatId: targetChatId, fileName, size: totalBytes, message: msg });
+  } catch (err) {
+    console.error('[AirGram Remote URL Upload Error]', err);
+    res.status(500).json({ error: err.message || 'Remote URL upload failed' });
+  } finally {
+    fs.unlink(tmpPath, () => {});
+  }
 });
 
 app.post('/api/backup/upload', requireAuth, upload.single('file'), async (req, res) => {
