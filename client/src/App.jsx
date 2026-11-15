@@ -1,6 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
-import { apiFetch, loadBookmarks, loadPrefs, savePrefs, streamUrl, toggleBookmark } from './api';
+import {
+  apiFetch,
+  loadBookmarks,
+  loadPrefs,
+  loadRecentItems,
+  recordRecentItem,
+  savePrefs,
+  streamUrl,
+  toggleBookmark,
+} from './api';
 import LoginView from './components/LoginView';
 import ChatsSidebar from './components/ChatsSidebar';
 import FilesBrowser from './components/FilesBrowser';
@@ -11,27 +20,39 @@ import PdfModal from './components/PdfModal';
 import EpubModal from './components/EpubModal';
 import AudioMiniPlayer from './components/AudioMiniPlayer';
 import SettingsModal from './components/SettingsModal';
+import ShareModal from './components/ShareModal';
+import PublicShareView from './components/PublicShareView';
 
 export default function App() {
+  // Handle public share route /s/:shareId without requiring Telegram login
+  const pathMatch = window.location.pathname.match(/^\/s\/([^/]+)/);
+  if (pathMatch) {
+    return <PublicShareView shareId={decodeURIComponent(pathMatch[1])} />;
+  }
+
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [user, setUser] = useState(null);
   const [sessionString, setSessionString] = useState('');
 
   const [prefs, setPrefs] = useState(loadPrefs);
   const [bookmarks, setBookmarks] = useState(loadBookmarks);
+  const [recentItems, setRecentItems] = useState(loadRecentItems);
   const [showBookmarksOnly, setShowBookmarksOnly] = useState(false);
 
   const [chats, setChats] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [chatsLoading, setChatsLoading] = useState(false);
   const [selectedChat, setSelectedChat] = useState(null);
   const [mobileChatsOpen, setMobileChatsOpen] = useState(false);
 
   const [tab, setTab] = useState('video');
   const [searchQuery, setSearchQuery] = useState('');
+  const [globalSearch, setGlobalSearch] = useState(false);
   const [mediaItems, setMediaItems] = useState([]);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [nextOffsetId, setNextOffsetId] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+
   const [chatMessages, setChatMessages] = useState([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatNextOffsetId, setChatNextOffsetId] = useState(0);
@@ -43,6 +64,7 @@ export default function App() {
   const [activePdf, setActivePdf] = useState(null);
   const [activeEpub, setActiveEpub] = useState(null);
   const [inspectItem, setInspectItem] = useState(null);
+  const [shareItem, setShareItem] = useState(null);
   const [audioTrack, setAudioTrack] = useState(null);
   const [audioQueue, setAudioQueue] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -73,9 +95,10 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     setChatsLoading(true);
-    apiFetch('/api/chats?limit=100')
+    apiFetch('/api/chats?limit=150')
       .then((data) => {
         setChats(data.chats || []);
+        setFolders(data.folders || []);
         if (!selectedChat && data.chats?.length) {
           setSelectedChat(data.chats[0]);
         }
@@ -101,6 +124,24 @@ export default function App() {
     }
   };
 
+  const fetchGlobalSearch = async (query, currentTab) => {
+    if (!query.trim()) {
+      setMediaItems([]);
+      return;
+    }
+    setMediaLoading(true);
+    try {
+      const data = await apiFetch(
+        `/api/search?q=${encodeURIComponent(query)}&tab=${encodeURIComponent(currentTab)}&limit=40`
+      );
+      setMediaItems(data.items || []);
+      setHasMore(false);
+    } catch {
+      setMediaItems([]);
+    } finally {
+      setMediaLoading(false);
+    }
+  };
 
   const fetchChatTimeline = async (chatId, offsetId = 0, query = '', prepend = false) => {
     if (!chatId) return;
@@ -133,13 +174,27 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (selectedChat && !showBookmarksOnly) {
+    if (showBookmarksOnly) return;
+    if (globalSearch) {
+      if (tab === 'chats') setTab('video');
+      else if (searchQuery.trim()) fetchGlobalSearch(searchQuery, tab);
+      else setMediaItems([]);
+      return;
+    }
+    if (selectedChat) {
       if (tab === 'chats') fetchChatTimeline(selectedChat.id, 0, searchQuery, false);
       else fetchMedia(selectedChat.id, tab, 0, searchQuery, false);
     }
-  }, [selectedChat?.id, tab, showBookmarksOnly]);
+  }, [selectedChat?.id, tab, showBookmarksOnly, globalSearch]);
 
   const handleOpenItem = (item) => {
+    const isPdf = item.mimeType === 'application/pdf' || item.fileName?.toLowerCase().endsWith('.pdf');
+    const isEpub = item.mimeType === 'application/epub+zip' || item.fileName?.toLowerCase().endsWith('.epub');
+
+    if (item.kind === 'video' || isPdf || isEpub) {
+      setRecentItems(recordRecentItem(item));
+    }
+
     if (item.kind === 'video') {
       setActiveVideo(item);
     } else if (item.kind === 'audio') {
@@ -148,9 +203,9 @@ export default function App() {
       setAudioTrack(item);
     } else if (item.kind === 'photo') {
       setActivePhoto(item);
-    } else if (item.mimeType === 'application/pdf' || item.fileName?.toLowerCase().endsWith('.pdf')) {
+    } else if (isPdf) {
       setActivePdf(item);
-    } else if (item.mimeType === 'application/epub+zip' || item.fileName?.toLowerCase().endsWith('.epub')) {
+    } else if (isEpub) {
       setActiveEpub(item);
     } else {
       window.open(streamUrl(item.chatId, item.id, prefs.streamingMode, true), '_blank');
@@ -202,10 +257,12 @@ export default function App() {
         <ChatsSidebar
           user={user}
           chats={chats}
+          folders={folders}
           selectedChat={selectedChat}
           loading={chatsLoading}
           onSelectChat={(c) => {
             setShowBookmarksOnly(false);
+            setGlobalSearch(false);
             setSelectedChat(c);
           }}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -231,10 +288,12 @@ export default function App() {
             <ChatsSidebar
               user={user}
               chats={chats}
+              folders={folders}
               selectedChat={selectedChat}
               loading={chatsLoading}
               onSelectChat={(c) => {
                 setShowBookmarksOnly(false);
+                setGlobalSearch(false);
                 setSelectedChat(c);
                 setMobileChatsOpen(false);
               }}
@@ -258,17 +317,28 @@ export default function App() {
         onLoadMore={() => fetchMedia(selectedChat?.id, tab, nextOffsetId, searchQuery, true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        onSearchSubmit={() => (tab === 'chats' ? fetchChatTimeline(selectedChat?.id, 0, searchQuery, false) : fetchMedia(selectedChat?.id, tab, 0, searchQuery, false))}
+        onSearchSubmit={() => {
+          if (globalSearch) fetchGlobalSearch(searchQuery, tab);
+          else if (tab === 'chats') fetchChatTimeline(selectedChat?.id, 0, searchQuery, false);
+          else fetchMedia(selectedChat?.id, tab, 0, searchQuery, false);
+        }}
+        globalSearch={globalSearch}
+        onToggleGlobalSearch={() => {
+          setShowBookmarksOnly(false);
+          setGlobalSearch((g) => !g);
+        }}
         viewMode={prefs.viewMode}
         onViewModeChange={(v) => updatePrefs({ ...prefs, viewMode: v })}
         prefs={prefs}
         isPlayingSomething={Boolean(activeVideo || audioTrack)}
         bookmarks={bookmarks}
+        recentItems={recentItems}
         showBookmarksOnly={showBookmarksOnly}
         onToggleBookmarksOnly={() => setShowBookmarksOnly((s) => !s)}
         onToggleBookmark={(item) => setBookmarks(toggleBookmark(item))}
         onOpenItem={handleOpenItem}
         onInspectItem={setInspectItem}
+        onShareItem={setShareItem}
         onOpenMobileChats={() => setMobileChatsOpen(true)}
         chatMessages={chatMessages}
         chatLoading={chatLoading}
@@ -301,11 +371,18 @@ export default function App() {
             setInspectItem(null);
             handleOpenItem(it);
           }}
+          onShare={(it) => {
+            setInspectItem(null);
+            setShareItem(it);
+          }}
           onClose={() => setInspectItem(null)}
         />
       )}
 
-      {/* Photo & PDF Modals */}
+      {/* Share Modal */}
+      {shareItem && <ShareModal item={shareItem} onClose={() => setShareItem(null)} />}
+
+      {/* Photo, PDF & EPUB Modals */}
       {activePhoto && <PhotoModal item={activePhoto} onClose={() => setActivePhoto(null)} />}
       {activePdf && <PdfModal item={activePdf} mode={prefs.streamingMode} onClose={() => setActivePdf(null)} />}
       {activeEpub && <EpubModal item={activeEpub} mode={prefs.streamingMode} onClose={() => setActiveEpub(null)} />}

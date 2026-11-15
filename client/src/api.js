@@ -18,15 +18,16 @@ const PREFS_KEY = 'airgram_prefs_v1';
 const RESUME_KEY = 'airgram_resume_v1';
 const BOOKMARKS_KEY = 'airgram_bookmarks_v1';
 const PDF_PAGE_KEY = 'airgram_pdf_page_v1';
-const EPUB_CFI_KEY = 'airgram_epub_cfi_v1';
+const PDF_TOTAL_KEY = 'airgram_pdf_total_v1';
+const RECENT_KEY = 'airgram_recent_v1';
 
 const DEFAULT_PREFS = {
   theme: 'dark',
-  streamingMode: 'fast_web', // 'fast_web' | 'telegram_hq'
+  streamingMode: 'fast_web',
   loadThumbnails: true,
   suspendThumbsOnPlay: true,
   playbackSpeed: 1,
-  viewMode: 'grid', // 'grid' | 'list'
+  viewMode: 'grid',
 };
 
 export function loadPrefs() {
@@ -67,29 +68,43 @@ export function getPdfPage(chatId, msgId) {
   }
 }
 
-export function setPdfPage(chatId, msgId, page) {
+export function getPdfTotal(chatId, msgId) {
+  try {
+    const map = JSON.parse(localStorage.getItem(PDF_TOTAL_KEY) || '{}');
+    return Number(map[`${chatId}_${msgId}`] || 0);
+  } catch {
+    return 0;
+  }
+}
+
+export function setPdfPage(chatId, msgId, page, total = 0) {
   try {
     const map = JSON.parse(localStorage.getItem(PDF_PAGE_KEY) || '{}');
     map[`${chatId}_${msgId}`] = page;
     localStorage.setItem(PDF_PAGE_KEY, JSON.stringify(map));
+    if (total > 0) {
+      const tmap = JSON.parse(localStorage.getItem(PDF_TOTAL_KEY) || '{}');
+      tmap[`${chatId}_${msgId}`] = total;
+      localStorage.setItem(PDF_TOTAL_KEY, JSON.stringify(tmap));
+    }
   } catch {}
 }
 
-export function getEpubCfi(chatId, msgId) {
+export function loadRecentItems() {
   try {
-    const map = JSON.parse(localStorage.getItem(EPUB_CFI_KEY) || '{}');
-    return map[`${chatId}_${msgId}`] || '';
+    return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
   } catch {
-    return '';
+    return [];
   }
 }
 
-export function setEpubCfi(chatId, msgId, cfi) {
-  try {
-    const map = JSON.parse(localStorage.getItem(EPUB_CFI_KEY) || '{}');
-    map[`${chatId}_${msgId}`] = cfi;
-    localStorage.setItem(EPUB_CFI_KEY, JSON.stringify(map));
-  } catch {}
+export function recordRecentItem(item) {
+  if (!item) return [];
+  const key = `${item.chatId}_${item.id}`;
+  const list = loadRecentItems().filter((x) => `${x.chatId}_${x.id}` !== key);
+  const next = [{ ...item, openedAt: Date.now() }, ...list].slice(0, 12);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  return next;
 }
 
 export function loadBookmarks() {
