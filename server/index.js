@@ -540,12 +540,12 @@ app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
       seenChats.add(chatId);
 
       let offsetId = 0;
-      for (let page = 0; page < 4; page++) {
+      for (let page = 0; page < 500; page++) {
         const batch = await tg.getMediaMessages(req.tgSession, {
           chatId,
           tab: 'all',
           offsetId,
-          limit: 50,
+          limit: 80,
         });
         if (!batch.items.length) break;
         for (const item of batch.items) {
@@ -563,8 +563,9 @@ app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
           });
           syncedCount += 1;
         }
+        if (!batch.hasMore || !batch.nextOffsetId || batch.nextOffsetId === offsetId) break;
         offsetId = batch.nextOffsetId;
-        if (!batch.hasMore) break;
+        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
