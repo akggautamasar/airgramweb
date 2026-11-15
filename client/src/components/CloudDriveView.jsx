@@ -23,6 +23,9 @@ import {
   Loader2,
   Menu,
   Share2,
+  LayoutGrid,
+  List,
+  ArrowUpDown,
 } from 'lucide-react';
 import { apiFetch, formatBytes, formatDate, formatDuration, streamUrl } from '../api';
 
@@ -38,7 +41,6 @@ const CAT_META = [
 
 async function computeFileHash(file) {
   if (!window.crypto?.subtle || file.size > 150 * 1024 * 1024) {
-    // Fast deterministic fingerprint for very large files
     return `fast_${file.size}_${file.lastModified}_${file.name}`;
   }
   const buf = await file.arrayBuffer();
@@ -71,6 +73,9 @@ export default function CloudDriveView({
 
   const [activeCat, setActiveCat] = useState('all');
   const [galleryMode, setGalleryMode] = useState(false);
+  const [viewMode, setViewMode] = useState(prefs?.viewMode || 'grid'); // 'grid' | 'list'
+  const [sortBy, setSortBy] = useState('date_desc'); // date_desc | date_asc | size_desc | size_asc | name_asc | name_desc
+  const [visibleLimit, setVisibleLimit] = useState(60);
   const [search, setSearch] = useState('');
   const [selectedKeys, setSelectedKeys] = useState(new Set());
   const [zipping, setZipping] = useState(false);
@@ -78,8 +83,8 @@ export default function CloudDriveView({
 
   // Scanner & Live Upload Queue State
   const [scanning, setScanning] = useState(false);
-  const [scanSummary, setScanSummary] = useState(null); // { scanned, skipped, queued }
-  const [queue, setQueue] = useState([]); // [{ id, file, relPath, sha256, status: 'pending'|'uploading'|'done'|'failed', progress, error }]
+  const [scanSummary, setScanSummary] = useState(null);
+  const [queue, setQueue] = useState([]);
   const [paused, setPaused] = useState(false);
 
   const loadAll = async () => {
@@ -98,6 +103,10 @@ export default function CloudDriveView({
   useEffect(() => {
     loadAll();
   }, []);
+
+  useEffect(() => {
+    setVisibleLimit(60);
+  }, [activeCat, galleryMode, sortBy, search]);
 
   const handleSaveConfig = async (e) => {
     e.preventDefault();
@@ -119,7 +128,6 @@ export default function CloudDriveView({
     }
   };
 
-  // Scan folder / files -> compute hashes -> deduplicate -> start live queue
   const processSelectedFiles = async (fileList) => {
     const files = Array.from(fileList || []).filter((f) => f.size > 0);
     if (files.length === 0) return;
@@ -175,7 +183,6 @@ export default function CloudDriveView({
     setScanning(false);
   };
 
-  // Queue Runner
   useEffect(() => {
     if (paused || runningRef.current) return;
     const nextIdx = queue.findIndex((j) => j.status === 'pending');
@@ -236,28 +243,52 @@ export default function CloudDriveView({
       });
   }, [queue, paused]);
 
-  const filteredItems = useMemo(() => {
+  const filteredAndSorted = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return (drive.items || []).filter((it) => {
+    const list = (drive.items || []).filter((it) => {
       if (activeCat !== 'all' && it.category !== activeCat) return false;
       if (galleryMode && it.category !== 'photos' && it.category !== 'videos') return false;
       if (q && !String(it.fileName).toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [drive.items, activeCat, galleryMode, search]);
 
-  // Month-grouped Gallery buckets
+    list.sort((a, b) => {
+      switch (sortBy) {
+        case 'date_asc':
+          return (a.date || 0) - (b.date || 0);
+        case 'size_desc':
+          return (b.size || 0) - (a.size || 0);
+        case 'size_asc':
+          return (a.size || 0) - (b.size || 0);
+        case 'name_asc':
+          return String(a.fileName || '').localeCompare(String(b.fileName || ''));
+        case 'name_desc':
+          return String(b.fileName || '').localeCompare(String(a.fileName || ''));
+        case 'date_desc':
+        default:
+          return (b.date || 0) - (a.date || 0);
+      }
+    });
+
+    return list;
+  }, [drive.items, activeCat, galleryMode, search, sortBy]);
+
+  const visibleItems = useMemo(
+    () => filteredAndSorted.slice(0, visibleLimit),
+    [filteredAndSorted, visibleLimit]
+  );
+
   const galleryGroups = useMemo(() => {
     if (!galleryMode) return [];
     const map = new Map();
-    for (const it of filteredItems) {
+    for (const it of visibleItems) {
       const d = it.date ? new Date(it.date * 1000) : new Date();
       const label = d.toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
       if (!map.has(label)) map.set(label, []);
       map.get(label).push(it);
     }
     return Array.from(map.entries());
-  }, [filteredItems, galleryMode]);
+  }, [visibleItems, galleryMode]);
 
   const toggleSelect = (item) => {
     const key = `${item.chatId}_${item.id}`;
@@ -302,6 +333,33 @@ export default function CloudDriveView({
     failed: queue.filter((j) => j.status === 'failed').length,
     remaining: queue.filter((j) => j.status === 'pending' || j.status === 'uploading').length,
     current: queue.find((j) => j.status === 'uploading'),
+  };
+
+  const renderThumb = (item) => {
+    if (prefs?.loadThumbnails && item.hasThumb) {
+      return (
+        <img
+          src={`/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}`}
+          alt={item.title}
+          loading="lazy"
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+        />
+      );
+    }
+    if (item.miniThumb) {
+      return (
+        <img
+          src={item.miniThumb}
+          alt={item.title}
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+        />
+      );
+    }
+    return (
+      <div style={{ color: 'var(--text-muted)' }}>
+        {item.kind === 'audio' ? <Music size={34} /> : item.kind === 'video' ? <Film size={34} /> : <FileText size={34} />}
+      </div>
+    );
   };
 
   return (
@@ -357,16 +415,22 @@ export default function CloudDriveView({
             }}
           />
 
-          <button type="button" className="btn btn-primary" onClick={() => folderInputRef.current?.click()} disabled={scanning}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => folderInputRef.current?.click()}
+            disabled={scanning}
+            title="Pick a subfolder (note: Android blocks root Download folder — use Upload Files for Download)"
+          >
             {scanning ? <Loader2 size={15} className="spin" /> : <FolderUp size={15} />}
             Scan Folder
           </button>
           <button type="button" className="btn" onClick={() => filesInputRef.current?.click()} disabled={scanning}>
             <Upload size={15} /> Upload Files
           </button>
-          <button type="button" className="btn" onClick={handleSyncChannels} disabled={syncing} title="Sync index from your 7 Telegram channels">
+          <button type="button" className="btn" onClick={handleSyncChannels} disabled={syncing} title="Fetch ALL files from your 7 Telegram channels">
             <RefreshCw size={15} className={syncing ? 'spin' : ''} />
-            <span className="desktop-only">Sync Channels</span>
+            <span>{syncing ? 'Syncing...' : 'Sync Channels'}</span>
           </button>
           <button type="button" className="btn" onClick={() => setConfigOpen(true)} title="Configure 7 Channels & Captions">
             <Settings2 size={15} />
@@ -524,7 +588,7 @@ export default function CloudDriveView({
           })}
         </div>
 
-        {/* Filter & Bulk Action Bar */}
+        {/* Filter, Sort, Grid/List & Bulk Action Bar */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
           <input
             type="text"
@@ -532,9 +596,26 @@ export default function CloudDriveView({
             placeholder="Filter backed-up files..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ maxWidth: 260, padding: '8px 12px', fontSize: 13 }}
+            style={{ maxWidth: 240, padding: '8px 12px', fontSize: 13 }}
           />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <ArrowUpDown size={14} color="var(--text-muted)" />
+              <select
+                className="input"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                style={{ padding: '7px 10px', fontSize: 12.5, width: 'auto' }}
+              >
+                <option value="date_desc">Date: Newest First</option>
+                <option value="date_asc">Date: Oldest First</option>
+                <option value="size_desc">Size: Largest First</option>
+                <option value="size_asc">Size: Smallest First</option>
+                <option value="name_asc">Name: A → Z</option>
+                <option value="name_desc">Name: Z → A</option>
+              </select>
+            </div>
+
             <button
               type="button"
               className={`btn ${galleryMode ? 'btn-primary' : ''}`}
@@ -542,23 +623,55 @@ export default function CloudDriveView({
             >
               <ImageIcon size={15} /> Month Gallery
             </button>
+
+            {!galleryMode && (
+              <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{
+                    borderRadius: 0,
+                    padding: '7px 10px',
+                    background: viewMode === 'grid' ? 'rgba(59,130,246,0.18)' : 'transparent',
+                  }}
+                  onClick={() => setViewMode('grid')}
+                  title="Grid / Block View"
+                >
+                  <LayoutGrid size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{
+                    borderRadius: 0,
+                    padding: '7px 10px',
+                    background: viewMode === 'list' ? 'rgba(59,130,246,0.18)' : 'transparent',
+                  }}
+                  onClick={() => setViewMode('list')}
+                  title="List View"
+                >
+                  <List size={16} />
+                </button>
+              </div>
+            )}
+
             {selectedKeys.size > 0 && (
               <button type="button" className="btn btn-primary" onClick={handleBulkZip} disabled={zipping}>
                 {zipping ? <Loader2 size={15} className="spin" /> : <Archive size={15} />}
-                Download Zip ({selectedKeys.size})
+                Zip ({selectedKeys.size})
               </button>
             )}
           </div>
         </div>
 
-        {/* Content: Month Gallery OR Unified File List */}
+        {/* Content: Month Gallery OR Grid View OR List View */}
         {loading ? (
           <div style={{ textAlign: 'center', marginTop: 60, color: 'var(--text-muted)' }}>
             <Loader2 size={26} className="spin" />
           </div>
-        ) : filteredItems.length === 0 ? (
+        ) : filteredAndSorted.length === 0 ? (
           <div style={{ textAlign: 'center', marginTop: 60, color: 'var(--text-muted)', fontSize: 13.5 }}>
-            No backed-up files indexed yet. Click <strong>7 Channels</strong> to configure your channels & <strong>Sync Channels</strong>, or click <strong>Scan Folder</strong> to upload!
+            No backed-up files indexed yet. Click <strong>7 Channels</strong> to configure your channels & <strong>Sync Channels</strong>, or click <strong>Upload Files</strong>!
           </div>
         ) : galleryMode ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
@@ -582,12 +695,7 @@ export default function CloudDriveView({
                         cursor: 'pointer',
                       }}
                     >
-                      <img
-                        src={item.hasThumb ? `/api/thumb/${encodeURIComponent(item.chatId)}/${item.id}` : item.miniThumb || ''}
-                        alt={item.title}
-                        loading="lazy"
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                      />
+                      {renderThumb(item)}
                       {item.duration > 0 && (
                         <span
                           style={{
@@ -611,9 +719,119 @@ export default function CloudDriveView({
               </div>
             ))}
           </div>
+        ) : viewMode === 'grid' ? (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+              gap: 14,
+            }}
+          >
+            {visibleItems.map((item) => {
+              const key = `${item.chatId}_${item.id}`;
+              const checked = selectedKeys.has(key);
+              return (
+                <div
+                  key={key}
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: `1px solid ${checked ? 'var(--cyan)' : 'var(--border)'}`,
+                    borderRadius: 15,
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                  }}
+                >
+                  <div
+                    onClick={() => onOpenItem(item)}
+                    style={{
+                      position: 'relative',
+                      height: 132,
+                      background: '#050811',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {renderThumb(item)}
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => toggleSelect(item)}
+                      style={{ position: 'absolute', top: 8, left: 8, width: 16, height: 16 }}
+                    />
+                    {item.duration > 0 && (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          right: 8,
+                          bottom: 8,
+                          background: 'rgba(0,0,0,0.78)',
+                          color: '#fff',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          padding: '2px 7px',
+                          borderRadius: 6,
+                        }}
+                      >
+                        {formatDuration(item.duration)}
+                      </span>
+                    )}
+                  </div>
+
+                  <div style={{ padding: 11, flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div
+                      onClick={() => onOpenItem(item)}
+                      title={item.fileName}
+                      style={{
+                        fontWeight: 600,
+                        fontSize: 13,
+                        cursor: 'pointer',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {item.fileName}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 'auto' }}>
+                      {item.category} · {formatBytes(item.size)} · {formatDate(item.date)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingTop: 4 }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        style={{ flex: 1, padding: '6px 10px', fontSize: 12 }}
+                        onClick={() => onOpenItem(item)}
+                      >
+                        <Play size={12} /> {item.streamable ? 'Stream' : 'Open'}
+                      </button>
+                      {item.versionCount > 1 && (
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ padding: '6px 8px', fontSize: 11.5 }}
+                          onClick={() => setVersionModalItem(item)}
+                        >
+                          v{item.versionCount}
+                        </button>
+                      )}
+                      <button type="button" className="btn" style={{ padding: '6px 8px' }} onClick={() => onShareItem(item)}>
+                        <Share2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {filteredItems.map((item) => {
+            {visibleItems.map((item) => {
               const key = `${item.chatId}_${item.id}`;
               const checked = selectedKeys.has(key);
               return (
@@ -663,6 +881,14 @@ export default function CloudDriveView({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {filteredAndSorted.length > visibleLimit && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+            <button type="button" className="btn" onClick={() => setVisibleLimit((v) => v + 60)}>
+              Show More ({filteredAndSorted.length - visibleLimit} remaining)
+            </button>
           </div>
         )}
       </div>
