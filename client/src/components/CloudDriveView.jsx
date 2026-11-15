@@ -101,7 +101,14 @@ export default function CloudDriveView({
   };
 
   useEffect(() => {
-    loadAll();
+    loadAll().then(() => {
+      // Fast incremental delta sync in background for files added via AirDrive APK or Telegram
+      apiFetch('/api/backup/sync-channels', { method: 'POST' })
+        .then((res) => {
+          if (res?.drive) setDrive(res.drive);
+        })
+        .catch(() => {});
+    });
   }, []);
 
   useEffect(() => {
@@ -118,10 +125,11 @@ export default function CloudDriveView({
     setConfigOpen(false);
   };
 
-  const handleSyncChannels = async () => {
+  const handleSyncChannels = async (full = false) => {
     setSyncing(true);
     try {
-      const res = await apiFetch('/api/backup/sync-channels', { method: 'POST' });
+      const url = full ? '/api/backup/sync-channels?full=1' : '/api/backup/sync-channels';
+      const res = await apiFetch(url, { method: 'POST' });
       if (res.drive) setDrive(res.drive);
     } finally {
       setSyncing(false);
@@ -428,7 +436,7 @@ export default function CloudDriveView({
           <button type="button" className="btn" onClick={() => filesInputRef.current?.click()} disabled={scanning}>
             <Upload size={15} /> Upload Files
           </button>
-          <button type="button" className="btn" onClick={handleSyncChannels} disabled={syncing} title="Fetch ALL files from your 7 Telegram channels">
+          <button type="button" className="btn" onClick={() => handleSyncChannels(false)} disabled={syncing} title="Fetch ALL files from your 7 Telegram channels">
             <RefreshCw size={15} className={syncing ? 'spin' : ''} />
             <span>{syncing ? 'Syncing...' : 'Sync Channels'}</span>
           </button>
@@ -959,9 +967,23 @@ export default function CloudDriveView({
               />
             </div>
 
-            <button type="submit" className="btn btn-primary">
-              Save 7-Channel Settings
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="submit" className="btn btn-primary" style={{ flex: 1 }}>
+                Save 7-Channel Settings
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={syncing}
+                onClick={() => {
+                  setConfigOpen(false);
+                  handleSyncChannels(true);
+                }}
+                title="Rebuild entire index from message #1 across all 7 channels"
+              >
+                Full Rescan
+              </button>
+            </div>
           </form>
         </div>
       )}
