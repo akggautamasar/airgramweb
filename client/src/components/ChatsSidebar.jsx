@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Bookmark, Search, Radio, Users, User, Bot, Settings, Pin, Archive, Folder } from 'lucide-react';
+import { Bookmark, Search, Radio, Users, User, Bot, Settings, Pin, Archive, Folder, Cloud } from 'lucide-react';
 
 export default function ChatsSidebar({
   user,
@@ -8,6 +8,8 @@ export default function ChatsSidebar({
   selectedChat,
   onSelectChat,
   onOpenSettings,
+  cloudDriveOpen,
+  onOpenCloudDrive,
   loading,
 }) {
   const [query, setQuery] = useState('');
@@ -119,6 +121,20 @@ export default function ChatsSidebar({
           </button>
         </div>
       </div>
+
+      {/* Cloud Drive Quick Switch */}
+      {onOpenCloudDrive && (
+        <div style={{ padding: '10px 14px 0' }}>
+          <button
+            type="button"
+            className={`btn ${cloudDriveOpen ? 'btn-primary' : ''}`}
+            style={{ width: '100%', justifyContent: 'flex-start', padding: '9px 12px', fontSize: 13 }}
+            onClick={onOpenCloudDrive}
+          >
+            <Cloud size={16} /> Cloud Drive (7-Channel Backup)
+          </button>
+        </div>
+      )}
 
       {/* Search + Folders + Type Filter */}
       <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid var(--border)' }}>
