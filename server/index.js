@@ -11,7 +11,9 @@ const cookieParser = require('cookie-parser');
 
 const { TelegramManager, signToken, verifyToken } = require('./telegramManager');
 const { StreamEngine } = require('./streamEngine');
+const archiver = require('archiver');
 const { ShareStore } = require('./shareStore');
+const { BackupStore, CATEGORIES, categorizeFile, formatCaption } = require('./backupStore');
 const { STREAMING_MODES } = require('./streamingPolicy');
 
 const app = express();
@@ -20,6 +22,7 @@ const PORT = Number(process.env.PORT || 3000);
 const tg = new TelegramManager();
 const streamEngine = new StreamEngine(process.env.STREAM_CACHE_MAX_MB || 256);
 const shareStore = new ShareStore();
+const backupStore = new BackupStore();
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
@@ -503,6 +506,174 @@ app.get('/api/share/:id/playlist.m3u', (req, res) => {
 #EXTINF:-1,${access.info.meta.title || access.info.meta.fileName}
 ${directUrl}
 `);
+});
+
+
+// --- AirDrive 7-Channel Backup, Sync, Dedup, Cloud Drive & Bulk Zip ---
+function humanSize(bytes) {
+  const b = Number(bytes || 0);
+  if (b <= 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+  return `${(b / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
+
+app.get('/api/backup/config', requireAuth, (req, res) => {
+  res.json(backupStore.getConfig(req.tgSession.user?.id));
+});
+
+app.post('/api/backup/config', requireAuth, (req, res) => {
+  const updated = backupStore.setConfig(req.tgSession.user?.id, req.body || {});
+  res.json(updated);
+});
+
+app.post('/api/backup/sync-channels', requireAuth, async (req, res) => {
+  try {
+    const userId = req.tgSession.user?.id;
+    const cfg = backupStore.getConfig(userId);
+    const seenChats = new Set();
+    let syncedCount = 0;
+
+    for (const cat of CATEGORIES) {
+      const chatId = cfg.channels[cat];
+      if (!chatId || seenChats.has(chatId)) continue;
+      seenChats.add(chatId);
+
+      let offsetId = 0;
+      for (let page = 0; page < 4; page++) {
+        const batch = await tg.getMediaMessages(req.tgSession, {
+          chatId,
+          tab: 'all',
+          offsetId,
+          limit: 50,
+        });
+        if (!batch.items.length) break;
+        for (const item of batch.items) {
+          backupStore.addRecord(userId, {
+            fileName: item.fileName,
+            size: item.size,
+            category: cat,
+            chatId: item.chatId,
+            msgId: item.id,
+            date: item.date,
+            mimeType: item.mimeType,
+            duration: item.duration,
+            hasThumb: item.hasThumb,
+            miniThumb: item.miniThumb,
+          });
+          syncedCount += 1;
+        }
+        offsetId = batch.nextOffsetId;
+        if (!batch.hasMore) break;
+      }
+    }
+
+    res.json({ ok: true, syncedCount, drive: backupStore.getDriveView(userId) });
+  } catch (err) {
+    console.error('[AirGram Sync Error]', err);
+    res.status(500).json({ error: err.message || 'Sync failed' });
+  }
+});
+
+app.post('/api/backup/check-duplicates', requireAuth, (req, res) => {
+  const results = backupStore.checkDuplicates(req.tgSession.user?.id, req.body?.files || []);
+  res.json({ results });
+});
+
+app.post('/api/backup/upload', requireAuth, upload.single('file'), async (req, res) => {
+  const uploaded = req.file;
+  if (!uploaded) return res.status(400).json({ error: 'No file provided' });
+  try {
+    const userId = req.tgSession.user?.id;
+    const { sha256 = '', relPath = '' } = req.body;
+    const cfg = backupStore.getConfig(userId);
+    const category = categorizeFile(uploaded.originalname, uploaded.mimetype, relPath);
+    const targetChatId = cfg.channels[category] || req.tgSession.user?.id;
+
+    const ext = uploaded.originalname.includes('.') ? uploaded.originalname.split('.').pop() : '';
+    const caption = formatCaption(cfg.captionTemplate, {
+      name: uploaded.originalname,
+      category,
+      size: humanSize(uploaded.size),
+      date: new Date().toISOString().slice(0, 10),
+      ext,
+    });
+
+    const msg = await tg.sendChatFile(req.tgSession, {
+      chatId: targetChatId,
+      filePath: uploaded.path,
+      originalName: uploaded.originalname,
+      mimeType: uploaded.mimetype,
+      caption,
+    });
+
+    backupStore.addRecord(userId, {
+      sha256,
+      fileName: uploaded.originalname,
+      size: uploaded.size,
+      category,
+      chatId: targetChatId,
+      msgId: msg.id,
+      date: msg.date,
+      mimeType: uploaded.mimetype,
+      duration: msg.media?.duration || 0,
+      hasThumb: Boolean(msg.media?.hasThumb),
+      miniThumb: msg.media?.miniThumb || null,
+    });
+
+    res.json({ ok: true, category, chatId: targetChatId, message: msg });
+  } catch (err) {
+    console.error('[AirGram Backup Upload Error]', err);
+    res.status(500).json({ error: err.message || 'Backup upload failed' });
+  } finally {
+    fs.unlink(uploaded.path, () => {});
+  }
+});
+
+app.get('/api/backup/drive', requireAuth, (req, res) => {
+  res.json(backupStore.getDriveView(req.tgSession.user?.id));
+});
+
+app.get('/api/backup/export.csv', requireAuth, (req, res) => {
+  const csv = backupStore.exportCsv(req.tgSession.user?.id);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="airgram-backup-manifest.csv"');
+  res.send(csv);
+});
+
+app.post('/api/bulk-zip', requireAuth, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length === 0) return res.status(400).json({ error: 'No files selected' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="airgram-bundle.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 1 } });
+    archive.on('error', (err) => {
+      console.error('[AirGram Bulk Zip Error]', err);
+      if (!res.headersSent) res.status(500).end();
+    });
+    archive.pipe(res);
+
+    const usedNames = new Set();
+    for (const it of items.slice(0, 50)) {
+      const entry = await tg.getMessageAndMeta(req.tgSession, it.chatId, it.msgId);
+      if (!entry) continue;
+      let name = (entry.meta.fileName || `file_${it.msgId}`).replace(/[\/:*?"<>|]/g, '_');
+      while (usedNames.has(name)) {
+        name = `${it.msgId}_${name}`;
+      }
+      usedNames.add(name);
+      const buf = await req.tgSession.client.downloadMedia(entry.message, {});
+      if (buf) archive.append(Buffer.isBuffer(buf) ? buf : Buffer.from(buf), { name });
+    }
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('[AirGram Bulk Zip Error]', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Diagnostics & Cache ---
