@@ -1,0 +1,17 @@
+{
+  "name": "AirGram",
+  "short_name": "AirGram",
+  "description": "Fast online Telegram media player, chat browser, and PDF/EPUB reader",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070b14",
+  "theme_color": "#070b14",
+  "icons": [
+    {
+      "src": "/airgram-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
