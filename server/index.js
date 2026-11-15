@@ -1,7 +1,10 @@
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const express = require('express');
+const multer = require('multer');
+const upload = multer({ dest: path.join(os.tmpdir(), 'airgram_uploads'), limits: { fileSize: 500 * 1024 * 1024 } });
 const cors = require('cors');
 const compression = require('compression');
 const cookieParser = require('cookie-parser');
@@ -203,6 +206,30 @@ app.get('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
   }
 });
 
+
+app.post('/api/chats/:chatId/upload', requireAuth, upload.single('file'), async (req, res) => {
+  const uploaded = req.file;
+  if (!uploaded) return res.status(400).json({ error: 'No file provided' });
+  try {
+    const { chatId } = req.params;
+    const { caption = '', replyToMsgId = '' } = req.body;
+    const msg = await tg.sendChatFile(req.tgSession, {
+      chatId,
+      filePath: uploaded.path,
+      originalName: uploaded.originalname,
+      mimeType: uploaded.mimetype,
+      caption,
+      replyToMsgId: replyToMsgId || null,
+    });
+    res.json({ message: msg });
+  } catch (err) {
+    console.error('[AirGram Upload Error]', err);
+    res.status(500).json({ error: err.message || 'Upload failed' });
+  } finally {
+    fs.unlink(uploaded.path, () => {});
+  }
+});
+
 app.post('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
   try {
     const { chatId } = req.params;
@@ -326,6 +353,23 @@ app.all('/api/stream/:chatId/:msgId', async (req, res) => {
 
 
 // --- Public Share Links (Optional Password & Expiry / Lifetime) ---
+
+app.get('/api/shares', requireAuth, (req, res) => {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const list = shareStore.listByOwner(req.tgSession.user?.id).map((s) => ({
+    ...s,
+    shareUrl: `${proto}://${host}/s/${s.id}`,
+  }));
+  res.json({ shares: list });
+});
+
+app.delete('/api/shares/:id', requireAuth, (req, res) => {
+  const ok = shareStore.revoke(req.params.id, req.tgSession.user?.id);
+  if (!ok) return res.status(404).json({ error: 'Share link not found' });
+  res.json({ ok: true });
+});
+
 app.post('/api/share', requireAuth, async (req, res) => {
   try {
     const { chatId, msgId, password = '', expiresInHours = 0 } = req.body;
@@ -335,6 +379,7 @@ app.post('/api/share', requireAuth, async (req, res) => {
     if (!entry) return res.status(404).json({ error: 'File not found' });
 
     const share = shareStore.createShare({
+      ownerId: req.tgSession.user?.id,
       chatId,
       msgId,
       meta: entry.meta,

@@ -1,7 +1,9 @@
 const bigInt = require('big-integer');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const fs = require('fs');
 const { TelegramClient, Api } = require('telegram');
+const { CustomFile } = require('telegram/client/uploads');
 const { StringSession } = require('telegram/sessions');
 const { computeCheck } = require('telegram/Password');
 
@@ -642,6 +644,40 @@ class TelegramManager {
       messages: items.reverse(),
       nextOffsetId,
       hasMore: Boolean(msgs && msgs.length >= (Number(limit) || 40)),
+    };
+  }
+
+
+  async sendChatFile(session, { chatId, filePath, originalName, mimeType, caption, replyToMsgId }) {
+    const peer = resolvePeer(session, chatId);
+    const stat = fs.statSync(filePath);
+    const customFile = new CustomFile(originalName || 'upload.bin', stat.size, filePath);
+    const isMedia =
+      mimeType?.startsWith('image/') ||
+      mimeType?.startsWith('video/') ||
+      mimeType?.startsWith('audio/');
+
+    const m = await session.client.sendFile(peer, {
+      file: customFile,
+      caption: caption ? String(caption) : undefined,
+      replyTo: replyToMsgId ? Number(replyToMsgId) : undefined,
+      forceDocument: !isMedia,
+    });
+
+    const meta = extractMediaMeta(m, chatId);
+    if (meta) {
+      this.messageCache.set(`${session.authId}:${chatId}:${m.id}`, { message: m, meta });
+    }
+    return {
+      id: m.id,
+      chatId: String(chatId),
+      date: m.date || Math.floor(Date.now() / 1000),
+      out: true,
+      senderName: [session.user?.firstName, session.user?.lastName].filter(Boolean).join(' '),
+      text: m.message || caption || '',
+      replyToMsgId: replyToMsgId ? Number(replyToMsgId) : null,
+      fwdFrom: null,
+      media: meta,
     };
   }
 

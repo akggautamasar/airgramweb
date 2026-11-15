@@ -66,13 +66,14 @@ class ShareStore {
     fs.writeFileSync(SHARES_FILE, JSON.stringify(this.shares, null, 2));
   }
 
-  createShare({ chatId, msgId, meta, sessionString, password, expiresInHours }) {
+  createShare({ ownerId, chatId, msgId, meta, sessionString, password, expiresInHours }) {
     const id = crypto.randomBytes(6).toString('base64url');
     const hrs = Number(expiresInHours || 0);
     const expiresAt = hrs > 0 ? Date.now() + hrs * 3600 * 1000 : null; // null = Lifetime
 
     this.shares[id] = {
       id,
+      ownerId: String(ownerId || ''),
       chatId: String(chatId),
       msgId: Number(msgId),
       meta: {
@@ -123,6 +124,34 @@ class ShareStore {
     const entry = this.getRaw(id);
     if (!entry) return false;
     return verifyPassword(password, entry.passwordHash);
+  }
+
+
+  listByOwner(ownerId) {
+    const now = Date.now();
+    let changed = false;
+    const out = [];
+    for (const [id, entry] of Object.entries(this.shares)) {
+      if (entry.expiresAt && now > entry.expiresAt) {
+        delete this.shares[id];
+        changed = true;
+        continue;
+      }
+      if (!ownerId || entry.ownerId === String(ownerId)) {
+        out.push(this.getPublicInfo(id));
+      }
+    }
+    if (changed) this.save();
+    return out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  revoke(id, ownerId) {
+    const entry = this.shares[id];
+    if (!entry) return false;
+    if (entry.ownerId && ownerId && entry.ownerId !== String(ownerId)) return false;
+    delete this.shares[id];
+    this.save();
+    return true;
   }
 
   getPublicInfo(id) {
