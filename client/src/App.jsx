@@ -1,3 +1,4 @@
+import CloneView from './components/CloneView';
 import React, { useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import {
@@ -70,6 +71,7 @@ export default function App() {
   const [audioQueue, setAudioQueue] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
+  const [cloneOpen, setCloneOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', prefs.theme);
@@ -262,6 +264,7 @@ export default function App() {
       await apiFetch('/api/auth/logout', { method: 'POST' });
     } catch {}
     setUser(null);
+    setCloneOpen(false);
     setChats([]);
     setSelectedChat(null);
     setSettingsOpen(false);
@@ -406,6 +409,8 @@ export default function App() {
       />
       )}
 
+      <button className="btn" style={{position:'fixed',right:12,bottom:80,zIndex:20}} onClick={()=>setCloneOpen(true)}>Clone chat</button>
+      {cloneOpen && <CloneView chats={chats} selectedChat={selectedChat} onClose={()=>setCloneOpen(false)}/>}
       {/* Video Player */}
       {activeVideo && (
         <VideoPlayerModal
