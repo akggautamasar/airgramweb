@@ -4,6 +4,15 @@
 
 ## Features
 
+### Fast Cloner (AirSaver-inspired)
+- **Forward mode**: batch `forwardMessages` — maximum speed on unrestricted chats.
+- **Re-upload mode**: parallel download + ordered upload pipeline for **restricted / protected** content your account can view (same approach as AirSaver bots).
+- **In-memory transfer** for files up to `CLONE_INMEM_MB` (default 200 MB) — skips disk I/O.
+- **Multi-worker** GramJS downloads/uploads (`CLONE_DL_WORKERS` / `CLONE_UL_WORKERS`).
+- **Flood-wait** aware retries, pause/resume checkpoints, live speed & progress in the UI.
+- Tune via env: `CLONE_PARALLEL`, `CLONE_INMEM_MB`, `CLONE_MAX_FILE_MB`, `CLONE_FORWARD_BATCH`.
+
+
 - **3-Mode Telegram Authentication**:
   - **QR Scan**: Instant QR code login (`Settings → Devices → Link Desktop Device`), with automatic 2FA password prompt if enabled.
   - **Phone + OTP + 2FA**: Classic mobile number login with verification code and cloud password support.
