@@ -22,7 +22,7 @@ const { CustomFile } = require('telegram/client/uploads');
 const root = path.resolve(process.env.CLONE_DATA_DIR || 'clone-data');
 
 // ── Tunables (env-overridable, AirSaver-style defaults) ─────────────────────
-const PARALLEL_FILES = Math.max(1, Number(process.env.CLONE_PARALLEL || 4));
+const PARALLEL_FILES = Math.max(1, Math.min(16, Math.floor(Number(process.env.CLONE_PARALLEL) || 4)));
 const INMEM_THRESHOLD = Math.max(1, Number(process.env.CLONE_INMEM_MB || 200)) * 1024 * 1024;
 const MAX_FILE_MB = Math.max(1, Number(process.env.CLONE_MAX_FILE_MB || 2048));
 const FORWARD_BATCH = Math.max(1, Number(process.env.CLONE_FORWARD_BATCH || 50));
@@ -32,9 +32,39 @@ const FLOOD_BASE_MS = Math.max(500, Number(process.env.CLONE_FLOOD_BASE_MS || 15
 
 const jobs = new Map();
 const running = new Set();
+const rateWindows = new WeakMap();
 
 const peer = (id) => (id === 'me' ? id : bigInt(id));
 const errorText = (e) => String(e?.errorMessage || e?.message || e);
+
+// Track aggregate payload progress independently of the most recent file callback.
+function trackProgress(j, direction) {
+  let previous = 0;
+  return (value) => {
+    const bytes = Math.max(0, Number(value) || 0);
+    const delta = bytes >= previous ? bytes - previous : bytes;
+    previous = bytes;
+    const now = Date.now();
+    let window = rateWindows.get(j);
+    if (!window) {
+      window = { start: now, download: 0, upload: 0 };
+      rateWindows.set(j, window);
+    }
+    window[direction] += delta;
+    const elapsed = (now - window.start) / 1000;
+    if (elapsed >= 1) {
+      j.metrics = {
+        downloadBps: Math.round(window.download / elapsed),
+        uploadBps: Math.round(window.upload / elapsed),
+        updatedAt: now,
+      };
+      window.start = now;
+      window.download = 0;
+      window.upload = 0;
+    }
+    return bytes;
+  };
+}
 
 function save(j) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -138,7 +168,10 @@ async function downloadOne(client, m, j) {
   const name = fileNameOf(m);
   const started = Date.now();
 
+  const record = trackProgress(j, 'download');
   const onProgress = (received, total) => {
+    received = record(received);
+    total = Number(total) || size;
     const now = Date.now();
     const elapsed = Math.max(1, (now - started) / 1000);
     const speed = received / elapsed;
@@ -167,8 +200,9 @@ async function downloadOne(client, m, j) {
       j,
       'download'
     );
-    if (!buf) throw new Error('Empty download buffer');
-    const buffer = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+    if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('Invalid or empty download buffer');
+    const buffer = buf;
+    if (m.media?.document && size > 0 && buffer.length !== size) throw new Error('Incomplete document download');
     return {
       kind: 'buffer',
       buffer,
@@ -202,6 +236,7 @@ async function downloadOne(client, m, j) {
       'download'
     );
     const st = fs.statSync(file);
+    if (!st.isFile() || !st.size || (m.media?.document && size > 0 && st.size !== size)) throw new Error('Invalid or incomplete downloaded file');
     return {
       kind: 'path',
       path: file,
@@ -231,7 +266,9 @@ function cleanupItem(item) {
 
 async function uploadOne(client, dst, item, j) {
   const started = Date.now();
-  const onProgress = (sent, total) => {
+  const record = trackProgress(j, 'upload');
+  const onProgress = (fraction) => {
+    const sent = record(Math.min(1, Math.max(0, Number(fraction) || 0)) * item.size);
     const now = Date.now();
     const elapsed = Math.max(1, (now - started) / 1000);
     const speed = sent / elapsed;
@@ -240,7 +277,7 @@ async function uploadOne(client, dst, item, j) {
       phase: 'upload',
       msgId: item.msgId,
       bytes: sent,
-      total: total || item.size,
+      total: item.size,
       speed,
       note: `↑ ${item.name}`,
     };
@@ -250,26 +287,44 @@ async function uploadOne(client, dst, item, j) {
     }
   };
 
-  let fileArg;
-  if (item.kind === 'buffer') {
-    fileArg = new CustomFile(item.name, item.buffer.length, '', item.buffer);
-  } else {
-    fileArg = new CustomFile(item.name, item.size, item.path);
-  }
+  let uploadDir;
+  try {
+    let fileArg;
+    if (item.kind === 'buffer') {
+      if (!Buffer.isBuffer(item.buffer) || !item.buffer.length || item.buffer.length !== item.size) {
+        throw new Error('Invalid upload buffer');
+      }
+      // GramJS may switch from buffer to path internally for larger files.
+      // Provide both valid inputs and keep the backing file until sendFile settles.
+      uploadDir = fs.mkdtempSync(path.join(root, 'upload-'));
+      const filePath = path.join(uploadDir, 'payload');
+      await fs.promises.writeFile(filePath, item.buffer, { mode: 0o600 });
+      fileArg = new CustomFile(item.name, item.size, filePath, item.buffer);
+    } else {
+      if (item.kind !== 'path' || !item.path) throw new Error('Missing upload path');
+      const st = fs.statSync(item.path);
+      if (!st.isFile() || !st.size || st.size !== item.size) throw new Error('Invalid upload file');
+      fileArg = new CustomFile(item.name, item.size, item.path);
+    }
 
-  await withFloodRetry(
-    () =>
-      client.sendFile(dst, {
-        file: fileArg,
-        caption: item.caption,
-        formattingEntities: item.entities,
-        forceDocument: item.isDocument,
-        workers: UL_WORKERS,
-        progressCallback: onProgress,
-      }),
-    j,
-    'upload'
-  );
+    await withFloodRetry(
+      () =>
+        client.sendFile(dst, {
+          file: fileArg,
+          caption: item.caption,
+          formattingEntities: item.entities,
+          forceDocument: item.isDocument,
+          workers: UL_WORKERS,
+          progressCallback: onProgress,
+        }),
+      j,
+      'upload'
+    );
+  } finally {
+    if (uploadDir) {
+      try { fs.rmSync(uploadDir, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
 }
 
 async function runForward(j, session) {
@@ -377,136 +432,78 @@ async function runReupload(j, session) {
     save(j);
   }
 
-  const messages = [];
-  for await (const m of c.iterMessages(src, {
-    reverse: true,
-    minId: Math.max(j.start - 1, j.cursor),
-    maxId: j.end + 1,
-  })) {
-    if (j.status !== 'running') break;
-    if (m.id < j.start || m.id > j.end) continue;
+  // Keep only a bounded number of downloads in flight. Attach rejection
+  // handlers at creation, not after an unrelated download finishes.
+  const pending = [];
+  let scanned = 0;
+  async function prepare(m) {
+    if (j.status !== 'running') throw new Error('Job paused or cancelled');
     if (m.className !== 'Message' || !j.types.includes(kind(m))) {
-      j.skipped++;
-      j.cursor = m.id;
-      continue;
+      return { skip: true, msgId: m.id };
     }
-    messages.push(m);
-  }
-  save(j);
-
-  const downloadSem = { count: 0, max: PARALLEL_FILES, waiters: [] };
-  async function acquire() {
-    if (downloadSem.count < downloadSem.max) {
-      downloadSem.count++;
-      return;
+    if (!m.media?.document && !m.media?.photo) {
+      return { textOnly: true, caption: m.message || '', entities: m.entities || [], msgId: m.id };
     }
-    await new Promise((resolve) => downloadSem.waiters.push(resolve));
-    downloadSem.count++;
-  }
-  function release() {
-    downloadSem.count--;
-    const next = downloadSem.waiters.shift();
-    if (next) next();
+    return downloadOne(c, m, j);
   }
 
-  let nextToUpload = 0;
-  const results = new Array(messages.length);
-  let uploadChain = Promise.resolve();
-  let warmed = false;
+  function enqueue(m) {
+    pending.push(prepare(m).then(item => ({ item }), error => ({ error })));
+  }
 
-  async function processUpload(idx) {
-    const item = results[idx];
-    if (!item || item === 'skip') return;
-    if (item.error) {
-      j.error = item.error;
-      throw new Error(item.error);
-    }
-    j.inflight = [item.msgId];
-    save(j);
+  async function consume() {
+    const result = await pending.shift();
+    if (result.error) throw result.error;
+    const item = result.item;
     try {
-      if (item.textOnly) {
-        await withFloodRetry(
-          () =>
-            c.sendMessage(dst, {
-              message: item.caption || ' ',
-              formattingEntities: item.entities,
-            }),
-          j,
-          'sendText'
-        );
-        j.forwarded++;
+      if (j.status !== 'running') throw new Error('Job paused or cancelled');
+      if (item.skip) {
+        j.skipped++;
       } else {
-        await uploadOne(c, dst, item, j);
-        j.uploaded++;
+        j.inflight = [item.msgId];
+        save(j);
+        if (item.textOnly) {
+          await withFloodRetry(() => c.sendMessage(dst, {
+            message: item.caption || ' ',
+            formattingEntities: item.entities,
+          }), j, 'sendText');
+          j.forwarded++;
+        } else {
+          await uploadOne(c, dst, item, j);
+          j.uploaded++;
+        }
+        j.inflight = [];
       }
       j.cursor = item.msgId;
-      j.inflight = [];
-      j.progress = {
-        ...(j.progress || {}),
-        phase: 'pipeline',
-        done: j.uploaded + j.forwarded,
-        total: messages.length,
-        note: `${j.uploaded + j.forwarded}/${messages.length}`,
-      };
       save(j);
     } finally {
       cleanupItem(item);
     }
   }
 
-  function scheduleOrderedUploads() {
-    uploadChain = uploadChain.then(async () => {
-      while (nextToUpload < messages.length && results[nextToUpload] != null) {
-        const idx = nextToUpload++;
-        if (results[idx] === 'skip') continue;
-        await processUpload(idx);
-        if (j.status !== 'running') break;
-      }
-    });
-    return uploadChain;
-  }
-
-  const downloadTasks = messages.map(async (m, idx) => {
-    if (j.status !== 'running') {
-      results[idx] = 'skip';
-      return;
+  try {
+    for await (const m of c.iterMessages(src, {
+      reverse: true,
+      minId: Math.max(j.start - 1, j.cursor),
+      maxId: j.end + 1,
+    })) {
+      if (j.status !== 'running') break;
+      if (m.id < j.start || m.id > j.end) continue;
+      scanned++;
+      enqueue(m);
+      if (pending.length >= PARALLEL_FILES) await consume();
     }
-
-    if (!m.media?.document && !m.media?.photo) {
-      results[idx] = {
-        textOnly: true,
-        caption: m.message || '',
-        entities: m.entities || [],
-        msgId: m.id,
+    while (pending.length && j.status === 'running') await consume();
+    if (j.status === 'running') {
+      j.status = 'completed';
+      j.progress = {
+        phase: 'done', note: 'Completed',
+        done: j.uploaded + j.forwarded, scanned,
       };
-      scheduleOrderedUploads();
-      return;
     }
-
-    await acquire();
-    try {
-      if (!warmed) warmed = true;
-      const item = await downloadOne(c, m, j);
-      results[idx] = item;
-    } catch (e) {
-      results[idx] = { error: errorText(e), msgId: m.id };
-    } finally {
-      release();
-    }
-    scheduleOrderedUploads();
-  });
-
-  await Promise.all(downloadTasks);
-  await uploadChain;
-
-  if (j.status === 'running') {
-    j.status = 'completed';
-    j.progress = {
-      phase: 'done',
-      note: 'Completed',
-      done: j.uploaded + j.forwarded,
-      total: messages.length,
-    };
+  } finally {
+    // Finish/clean any already-started downloads before releasing the job lock.
+    for (const result of await Promise.all(pending)) cleanupItem(result.item);
   }
 }
 
@@ -516,6 +513,8 @@ async function run(j, session) {
   j.status = 'running';
   j.error = '';
   j.progress = { phase: 'start', note: 'Starting…' };
+  j.metrics = null;
+  rateWindows.set(j, { start: Date.now(), download: 0, upload: 0 });
   save(j);
 
   try {
@@ -536,6 +535,7 @@ async function run(j, session) {
     }
   } finally {
     running.delete(j.id);
+    rateWindows.delete(j);
     j.progress = { ...(j.progress || {}), phase: j.status };
     save(j);
   }
