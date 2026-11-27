@@ -119,15 +119,14 @@ export default function CloneView({ chats, selectedChat, onClose }) {
         </header>
 
         <p style={{ opacity: 0.85, fontSize: 13, marginTop: 8 }}>
-          Forward mode is fastest for open chats. <strong>Re-upload mode</strong> downloads and
-          re-sends media (parallel + in-memory) so it works on restricted content you can view —
-          same approach as AirSaver.
+          Forward mode is fastest for unrestricted chats. <strong>Re-upload mode</strong> uses
+          validated temporary files and a bounded queue for unrestricted media.
         </p>
 
         {limits && (
           <p style={{ fontSize: 12, opacity: 0.7 }}>
             Engine: {limits.parallel} parallel DL · {limits.dlWorkers}/{limits.ulWorkers} workers ·
-            in-mem ≤{limits.inmemMb}MB · max {limits.maxFileMb}MB
+            disk-backed queue · max {limits.maxFileMb}MB
           </p>
         )}
 
@@ -196,8 +195,8 @@ export default function CloneView({ chats, selectedChat, onClose }) {
               checked={forceReupload}
               onChange={(e) => setForceReupload(e.target.checked)}
             />{' '}
-            <strong>Re-upload mode (restricted / protected content)</strong> — download + re-send
-            instead of forward. Use when source blocks forwards.
+            <strong>Re-upload mode (unrestricted content only)</strong> — download + re-send
+            instead of forward.
           </span>
         </label>
 
@@ -219,8 +218,7 @@ export default function CloneView({ chats, selectedChat, onClose }) {
 
         <p style={{ fontSize: 12, opacity: 0.75 }}>
           Jobs run on the server. Only one active job at a time. Pause applies after the current
-          transfer. Protected content requires Re-upload mode and a session that can view the
-          messages.
+          transfer. Protected sources are blocked; protected messages are skipped.
         </p>
 
         <button
@@ -311,8 +309,7 @@ export default function CloneView({ chats, selectedChat, onClose }) {
               )}
               {j.status === 'blocked' && (
                 <p style={{ fontSize: 12 }}>
-                  Source restricts saving. Enable <strong>Re-upload mode</strong> if your account can
-                  view the messages, or ask the owner for an authorized copy.
+                  Source restricts saving. Ask the owner for an authorized copy.
                 </p>
               )}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
