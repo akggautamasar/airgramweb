@@ -3,12 +3,11 @@
  *
  * Modes:
  *   forward  — batch forwardMessages (fastest for unrestricted chats)
- *   reupload — download + re-upload pipeline (works for restricted content
- *              the logged-in user can view; preserves captions/entities)
+ *   reupload — bounded download + upload pipeline for unrestricted content only
  *
  * Speed phases (reupload):
  *   1. Parallel downloads (PARALLEL_FILES) with DC warm-up
- *   2. In-memory transfer for files ≤ INMEM_THRESHOLD (skip disk)
+ *   2. Validated temporary files; bounded prefetch and cleanup
  *   3. Pipelined ordered upload while downloads continue
  *   4. Tunable GramJS workers for multi-connection transfers
  */
@@ -22,8 +21,7 @@ const { CustomFile } = require('telegram/client/uploads');
 const root = path.resolve(process.env.CLONE_DATA_DIR || 'clone-data');
 
 // ── Tunables (env-overridable, AirSaver-style defaults) ─────────────────────
-const PARALLEL_FILES = Math.max(1, Number(process.env.CLONE_PARALLEL || 4));
-const INMEM_THRESHOLD = Math.max(1, Number(process.env.CLONE_INMEM_MB || 200)) * 1024 * 1024;
+const PARALLEL_FILES = Math.max(1, Math.min(4, Math.floor(Number(process.env.CLONE_PARALLEL) || 4)));
 const MAX_FILE_MB = Math.max(1, Number(process.env.CLONE_MAX_FILE_MB || 2048));
 const FORWARD_BATCH = Math.max(1, Number(process.env.CLONE_FORWARD_BATCH || 50));
 const DL_WORKERS = Math.max(1, Number(process.env.CLONE_DL_WORKERS || 8));
@@ -112,7 +110,8 @@ async function withFloodRetry(fn, j, label = 'op') {
       const err = errorText(e);
       const waitMatch = err.match(/FLOOD_WAIT[_OF_]*\s*(\d+)/i) || err.match(/wait of (\d+)/i);
       if (waitMatch) {
-        const sec = Math.min(120, Number(waitMatch[1]) || 5);
+        const sec = Number(waitMatch[1]) || 5;
+        if (sec > 120) throw e; // pause rather than retry before Telegram's wait expires
         const ms = sec * 1000 + FLOOD_BASE_MS;
         j.progress = { ...(j.progress || {}), floodWait: sec, note: `Flood wait ${sec}s (${label})` };
         save(j);
@@ -134,8 +133,9 @@ async function downloadOne(client, m, j) {
     throw new Error(`File exceeds ${MAX_FILE_MB} MiB limit (${Math.round(size / 1024 / 1024)} MiB)`);
   }
 
-  const useInmem = size > 0 && size <= INMEM_THRESHOLD;
-  const name = fileNameOf(m);
+  if (m.noforwards) throw new Error('Message has protected content');
+  const rawName = fileNameOf(m);
+  const name = rawName && rawName !== '.' && rawName !== '..' ? rawName : `file-${m.id}`;
   const started = Date.now();
 
   const onProgress = (received, total) => {
@@ -156,30 +156,6 @@ async function downloadOne(client, m, j) {
       save(j);
     }
   };
-
-  if (useInmem) {
-    const buf = await withFloodRetry(
-      () =>
-        client.downloadMedia(m, {
-          workers: DL_WORKERS,
-          progressCallback: onProgress,
-        }),
-      j,
-      'download'
-    );
-    if (!buf) throw new Error('Empty download buffer');
-    const buffer = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-    return {
-      kind: 'buffer',
-      buffer,
-      name,
-      size: buffer.length,
-      caption: m.message || '',
-      entities: m.entities || [],
-      isDocument: !!m.media?.document,
-      msgId: m.id,
-    };
-  }
 
   const dir = fs.mkdtempSync(path.join(root, 'xfer-'));
   const file = path.join(dir, name);
@@ -202,6 +178,9 @@ async function downloadOne(client, m, j) {
       'download'
     );
     const st = fs.statSync(file);
+    if (!st.isFile() || st.size <= 0 || st.size > MAX_FILE_MB * 1024 * 1024 || (m.media?.document && size > 0 && st.size !== size)) {
+      throw new Error('Downloaded file is empty, oversized or incomplete');
+    }
     return {
       kind: 'path',
       path: file,
@@ -234,12 +213,13 @@ async function uploadOne(client, dst, item, j) {
   const onProgress = (sent, total) => {
     const now = Date.now();
     const elapsed = Math.max(1, (now - started) / 1000);
-    const speed = sent / elapsed;
+    const bytes = total ? Number(sent) : Math.min(1, Math.max(0, Number(sent))) * item.size;
+    const speed = bytes / elapsed;
     j.progress = {
       ...(j.progress || {}),
       phase: 'upload',
       msgId: item.msgId,
-      bytes: sent,
+      bytes,
       total: total || item.size,
       speed,
       note: `↑ ${item.name}`,
@@ -250,12 +230,10 @@ async function uploadOne(client, dst, item, j) {
     }
   };
 
-  let fileArg;
-  if (item.kind === 'buffer') {
-    fileArg = new CustomFile(item.name, item.buffer.length, '', item.buffer);
-  } else {
-    fileArg = new CustomFile(item.name, item.size, item.path);
-  }
+  if (item.kind !== 'path' || !item.path || !fs.existsSync(item.path)) throw new Error('Missing upload file');
+  const stat = fs.statSync(item.path);
+  if (!stat.isFile() || stat.size <= 0 || stat.size !== item.size) throw new Error('Invalid upload file');
+  const fileArg = new CustomFile(item.name, stat.size, item.path);
 
   await withFloodRetry(
     () =>
@@ -282,9 +260,7 @@ async function runForward(j, session) {
   }
   const dst = await c.getInputEntity(target);
 
-  if (src.noforwards && !j.forceReupload) {
-    throw new Error('Source has protected content — enable Re-upload mode');
-  }
+  if (src.noforwards) throw new Error('Source has protected content');
 
   if (j.end === null) {
     const latest = await c.getMessages(src, { limit: 1 });
@@ -316,7 +292,7 @@ async function runForward(j, session) {
         throw e;
       }
       for (const m of batch) {
-        if (j.status !== 'running') break;
+        if (j.status !== 'running') throw new Error('Job paused or cancelled');
         if (m.noforwards || src.noforwards) throw e;
         if (!m.media?.document && !m.media?.photo) throw e;
         const item = await downloadOne(c, m, j);
@@ -365,148 +341,83 @@ async function runReupload(j, session) {
   const c = session.client;
   await c.getDialogs({ limit: 150 });
   const src = await c.getEntity(peer(j.source));
+  if (src.noforwards) throw new Error('Source has protected content');
   const target = await c.getEntity(peer(j.destination));
   if (String(src.id) === String(target.id) && src.className === target.className) {
     throw new Error('Source and destination must differ');
   }
   const dst = await c.getInputEntity(target);
-
   if (j.end === null) {
     const latest = await c.getMessages(src, { limit: 1 });
     j.end = latest[0]?.id || 0;
     save(j);
   }
 
-  const messages = [];
-  for await (const m of c.iterMessages(src, {
-    reverse: true,
-    minId: Math.max(j.start - 1, j.cursor),
-    maxId: j.end + 1,
-  })) {
-    if (j.status !== 'running') break;
-    if (m.id < j.start || m.id > j.end) continue;
-    if (m.className !== 'Message' || !j.types.includes(kind(m))) {
-      j.skipped++;
-      j.cursor = m.id;
-      continue;
-    }
-    messages.push(m);
-  }
-  save(j);
-
-  const downloadSem = { count: 0, max: PARALLEL_FILES, waiters: [] };
-  async function acquire() {
-    if (downloadSem.count < downloadSem.max) {
-      downloadSem.count++;
-      return;
-    }
-    await new Promise((resolve) => downloadSem.waiters.push(resolve));
-    downloadSem.count++;
-  }
-  function release() {
-    downloadSem.count--;
-    const next = downloadSem.waiters.shift();
-    if (next) next();
+  // Every pending promise is handled immediately, including download failures.
+  // The queue holds at most PARALLEL_FILES items and commits cursors in order.
+  const pending = [];
+  function enqueue(m) {
+    const task = Promise.resolve().then(async () => {
+      if (j.status !== 'running') throw new Error('Job paused or cancelled');
+      if (m.noforwards || m.className !== 'Message' || !j.types.includes(kind(m))) {
+        return { skip: true, msgId: m.id };
+      }
+      if (m.media?.document || m.media?.photo) return downloadOne(c, m, j);
+      if (kind(m) !== 'text' || !m.message) return { skip: true, msgId: m.id };
+      return { textOnly: true, caption: m.message, entities: m.entities || [], msgId: m.id };
+    }).then(item => ({ item }), error => ({ error }));
+    pending.push(task);
   }
 
-  let nextToUpload = 0;
-  const results = new Array(messages.length);
-  let uploadChain = Promise.resolve();
-  let warmed = false;
-
-  async function processUpload(idx) {
-    const item = results[idx];
-    if (!item || item === 'skip') return;
-    if (item.error) {
-      j.error = item.error;
-      throw new Error(item.error);
-    }
-    j.inflight = [item.msgId];
-    save(j);
+  async function consume() {
+    const result = await pending.shift();
+    if (result.error) throw result.error;
+    const item = result.item;
     try {
-      if (item.textOnly) {
-        await withFloodRetry(
-          () =>
-            c.sendMessage(dst, {
-              message: item.caption || ' ',
-              formattingEntities: item.entities,
-            }),
-          j,
-          'sendText'
-        );
-        j.forwarded++;
+      if (j.status !== 'running') throw new Error('Job paused or cancelled');
+      if (item.skip) {
+        j.skipped++;
       } else {
-        await uploadOne(c, dst, item, j);
-        j.uploaded++;
+        j.inflight = [item.msgId];
+        save(j);
+        if (item.textOnly) {
+          await withFloodRetry(() => c.sendMessage(dst, {
+            message: item.caption,
+            formattingEntities: item.entities,
+          }), j, 'sendText');
+          j.forwarded++;
+        } else {
+          await uploadOne(c, dst, item, j);
+          j.uploaded++;
+        }
+        j.inflight = [];
       }
       j.cursor = item.msgId;
-      j.inflight = [];
-      j.progress = {
-        ...(j.progress || {}),
-        phase: 'pipeline',
-        done: j.uploaded + j.forwarded,
-        total: messages.length,
-        note: `${j.uploaded + j.forwarded}/${messages.length}`,
-      };
       save(j);
     } finally {
       cleanupItem(item);
     }
   }
 
-  function scheduleOrderedUploads() {
-    uploadChain = uploadChain.then(async () => {
-      while (nextToUpload < messages.length && results[nextToUpload] != null) {
-        const idx = nextToUpload++;
-        if (results[idx] === 'skip') continue;
-        await processUpload(idx);
-        if (j.status !== 'running') break;
-      }
-    });
-    return uploadChain;
-  }
-
-  const downloadTasks = messages.map(async (m, idx) => {
-    if (j.status !== 'running') {
-      results[idx] = 'skip';
-      return;
+  try {
+    for await (const m of c.iterMessages(src, {
+      reverse: true,
+      minId: Math.max(j.start - 1, j.cursor),
+      maxId: j.end + 1,
+    })) {
+      if (j.status !== 'running') break;
+      if (m.id < j.start || m.id > j.end) continue;
+      enqueue(m);
+      if (pending.length >= PARALLEL_FILES) await consume();
     }
-
-    if (!m.media?.document && !m.media?.photo) {
-      results[idx] = {
-        textOnly: true,
-        caption: m.message || '',
-        entities: m.entities || [],
-        msgId: m.id,
-      };
-      scheduleOrderedUploads();
-      return;
+    while (pending.length && j.status === 'running') await consume();
+    if (j.status === 'running') {
+      j.status = 'completed';
+      j.progress = { phase: 'done', note: 'Completed', done: j.uploaded + j.forwarded };
     }
-
-    await acquire();
-    try {
-      if (!warmed) warmed = true;
-      const item = await downloadOne(c, m, j);
-      results[idx] = item;
-    } catch (e) {
-      results[idx] = { error: errorText(e), msgId: m.id };
-    } finally {
-      release();
-    }
-    scheduleOrderedUploads();
-  });
-
-  await Promise.all(downloadTasks);
-  await uploadChain;
-
-  if (j.status === 'running') {
-    j.status = 'completed';
-    j.progress = {
-      phase: 'done',
-      note: 'Completed',
-      done: j.uploaded + j.forwarded,
-      total: messages.length,
-    };
+  } finally {
+    // Drain outstanding downloads before releasing the global job lock.
+    for (const result of await Promise.all(pending)) cleanupItem(result.item);
   }
 }
 
@@ -550,7 +461,7 @@ module.exports = function register(app, auth) {
       jobs: [...jobs.values()].filter((j) => j.owner === owner(req)),
       limits: {
         parallel: PARALLEL_FILES,
-        inmemMb: Math.round(INMEM_THRESHOLD / 1024 / 1024),
+        inmemMb: 0,
         maxFileMb: MAX_FILE_MB,
         forwardBatch: FORWARD_BATCH,
         dlWorkers: DL_WORKERS,
