@@ -77,7 +77,7 @@ async function run(j,session) {
       if(batch.length>=50)await flush();
     }
     if(j.status==='running'){await flush();if(j.status==='running')j.status='completed';}
-  } catch(e){j.error=errorText(e);if(j.inflight.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) { /* keep checkpoint for manual review */ } j.status=/protected content|CHAT_FORWARDS_RESTRICTED/i.test(j.error)?'blocked':'paused';}
+  } catch(e){j.error=errorText(e);if(j.inflight.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) { /* keep checkpoint for manual review */ } if(j.status!=='cancelled')j.status=/protected content|CHAT_FORWARDS_RESTRICTED/i.test(j.error)?'blocked':'paused';}
   finally{running.delete(j.id);save(j);}
 }
 module.exports=function register(app,auth){
@@ -102,6 +102,7 @@ module.exports=function register(app,auth){
   app.post('/api/clone/jobs/:id/:action',auth,(req,res)=>{
     const j=jobs.get(req.params.id);
     if(!j||j.owner!==owner(req))return res.status(404).json({error:'Job not found'});
+    if(req.params.action==='cancel'&&['running','paused','blocked','queued'].includes(j.status)){j.status='cancelled';save(j);return res.json({job:j});}
     if(req.params.action==='delete'&&!running.has(j.id)){fs.unlinkSync(path.join(root,j.id+'.json'));jobs.delete(j.id);return res.json({ok:true});}
     if(req.params.action==='pause'&&j.status==='running'){j.status='paused';save(j);}
     else if(req.params.action==='resume'&&j.status==='paused'&&!running.size&&!j.inflight.length){run(j,req.tgSession).catch(console.error);}
