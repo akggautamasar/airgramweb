@@ -301,7 +301,14 @@ export default function CloneView({ chats, selectedChat, onClose }) {
                 Forwarded {j.forwarded} · Re-uploaded {j.uploaded} · Skipped {j.skipped}
               </p>
               {j.status === 'running' && (
-                <p style={{ margin: '4px 0', fontSize: 12, opacity: 0.9 }}>{progressLine(j)}</p>
+                <div style={{ margin: '4px 0', fontSize: 12, opacity: 0.9 }}>
+                  <p style={{ margin: '4px 0' }}>{progressLine(j)} · per-file</p>
+                  <p style={{ margin: '4px 0', fontWeight: 600 }}>
+                    Aggregate payload: {j.metrics && Date.now() - j.metrics.updatedAt < 6000
+                      ? `↓ ${fmtSpeed(j.metrics.downloadBps)} · ↑ ${fmtSpeed(j.metrics.uploadBps)}`
+                      : 'No recent sample'}
+                  </p>
+                </div>
               )}
               {j.error && (
                 <p style={{ color: '#f87171', fontSize: 13 }}>{j.error}</p>
