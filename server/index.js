@@ -58,6 +58,8 @@ async function requireAuth(req, res, next) {
   }
 }
 
+require('./cloneRoutes')(app, requireAuth);
+
 // --- Health & Diagnostics ---
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'AirGram Web', time: new Date().toISOString() });
