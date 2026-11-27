@@ -77,7 +77,7 @@ async function run(j,session) {
       if(batch.length>=50)await flush();
     }
     if(j.status==='running'){await flush();if(j.status==='running')j.status='completed';}
-  } catch(e){j.error=errorText(e);if(j.inflight.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) { /* keep checkpoint for manual review */ } j.status='paused';}
+  } catch(e){j.error=errorText(e);if(j.inflight.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) { /* keep checkpoint for manual review */ } j.status=/protected content|CHAT_FORWARDS_RESTRICTED/i.test(j.error)?'blocked':'paused';}
   finally{running.delete(j.id);save(j);}
 }
 module.exports=function register(app,auth){
@@ -94,13 +94,15 @@ module.exports=function register(app,auth){
       if(end!==null&&end<start)throw Error('End must be at least start');
       const types=['photo','video','audio','pdf','document','text','other'].filter(t=>Array.isArray(b.types)&&b.types.includes(t));
       if(!types.length)throw Error('Select content types');
-      const j={id:crypto.randomUUID(),owner:owner(req),source,destination,start,end,types,fallback:b.fallback===true,cursor:start-1,forwarded:0,uploaded:0,skipped:0,inflight:[],status:'queued',createdAt:Date.now()};
+      if([...jobs.values()].some(j=>j.owner===owner(req)&&j.source===source&&j.destination===destination&&j.start===start&&(j.requestedEnd??null)===end&&JSON.stringify(j.types)===JSON.stringify(types)&&['running','queued','paused','blocked'].includes(j.status)))throw Error('Matching job already exists; review or delete it first');
+      const j={requestedEnd:end,id:crypto.randomUUID(),owner:owner(req),source,destination,start,end,types,fallback:b.fallback===true,cursor:start-1,forwarded:0,uploaded:0,skipped:0,inflight:[],status:'queued',createdAt:Date.now()};
       jobs.set(j.id,j);save(j);run(j,req.tgSession).catch(console.error);res.json({job:j});
     }catch(e){res.status(400).json({error:errorText(e)});}
   });
   app.post('/api/clone/jobs/:id/:action',auth,(req,res)=>{
     const j=jobs.get(req.params.id);
     if(!j||j.owner!==owner(req))return res.status(404).json({error:'Job not found'});
+    if(req.params.action==='delete'&&!running.has(j.id)){fs.unlinkSync(path.join(root,j.id+'.json'));jobs.delete(j.id);return res.json({ok:true});}
     if(req.params.action==='pause'&&j.status==='running'){j.status='paused';save(j);}
     else if(req.params.action==='resume'&&j.status==='paused'&&!running.size&&!j.inflight.length){run(j,req.tgSession).catch(console.error);}
     else return res.status(409).json({error:j.inflight.length?'Uncertain delivery: review destination before creating a new range':'Action unavailable'});
