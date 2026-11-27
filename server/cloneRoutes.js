@@ -31,7 +31,9 @@ async function run(j,session) {
   const c=session.client;
   try {
     await c.getDialogs({limit:150});
-    const src=await c.getEntity(peer(j.source)), dst=await c.getInputEntity(peer(j.destination));
+    const src=await c.getEntity(peer(j.source)), target=await c.getEntity(peer(j.destination));
+    if(String(src.id)===String(target.id)&&src.className===target.className) throw Error('Source and destination must differ');
+    const dst=await c.getInputEntity(target);
     if(src.noforwards) throw Error('Source has protected content');
     if(j.end===null){const latest=await c.getMessages(src,{limit:1});j.end=latest[0]?.id||0;save(j);}
     let batch=[];
@@ -45,7 +47,7 @@ async function run(j,session) {
         j.forwarded+=ids.length;
       } catch(e) {
         const err=errorText(e);
-        if(!j.fallback || !/FILE_REFERENCE_EXPIRED|MEDIA_EMPTY|MEDIA_INVALID/.test(err)) throw e;
+        if(!j.fallback || !/FILE_REFERENCE_EXPIRED|MEDIA_EMPTY|MEDIA_INVALID/.test(err)) {if(/FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(err)) {j.inflight=[];save(j);} throw e;}
         // Only explicit media errors permit fallback; never bypass protection or retry ambiguous sends.
         for(const m of batch){
           if(m.noforwards || src.noforwards || !m.media?.document && !m.media?.photo) throw e;
@@ -74,7 +76,7 @@ async function run(j,session) {
       batch.push(m);
       if(batch.length>=50)await flush();
     }
-    if(j.status==='running'){await flush();j.status='completed';}
+    if(j.status==='running'){await flush();if(j.status==='running')j.status='completed';}
   } catch(e){j.error=errorText(e);if(j.inflight.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) { /* keep checkpoint for manual review */ } j.status='paused';}
   finally{running.delete(j.id);save(j);}
 }
