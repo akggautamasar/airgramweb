@@ -183,6 +183,10 @@ class TelegramManager {
     return new TelegramClient(new StringSession(sessionStr), API_ID, API_HASH, {
       connectionRetries: 5,
       useWSS: false,
+      // Higher concurrency helps clone re-upload + streaming
+      requestRetries: 5,
+      autoReconnect: true,
+      floodSleepThreshold: 24,
     });
   }
 
