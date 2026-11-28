@@ -23,6 +23,7 @@ const root = path.resolve(process.env.CLONE_DATA_DIR || 'clone-data');
 
 // ── Tunables (env-overridable, AirSaver-style defaults) ─────────────────────
 const PARALLEL_FILES = Math.max(1, Math.min(16, Math.floor(Number(process.env.CLONE_PARALLEL) || 4)));
+const FAST_UNRESTRICTED = process.env.CLONE_FAST_UNRESTRICTED !== '0';
 const INMEM_THRESHOLD = Math.max(1, Number(process.env.CLONE_INMEM_MB || 200)) * 1024 * 1024;
 const MAX_FILE_MB = Math.max(1, Number(process.env.CLONE_MAX_FILE_MB || 2048));
 const FORWARD_BATCH = Math.max(1, Number(process.env.CLONE_FORWARD_BATCH || 50));
@@ -180,7 +181,7 @@ function downloadValidationError(m, expected, actual, storage, reason) {
 
 // GramJS accepts a writer whose write() result is awaited. Own the file
 // descriptor ourselves so validation never races buffered stream writes.
-async function writeMediaFile(client, m, file, onProgress) {
+async function writeMediaFile(client, m, file, onProgress, fast = false) {
   const handle = await fs.promises.open(file, 'w', 0o600);
   let count = 0;
   try {
@@ -197,20 +198,39 @@ async function writeMediaFile(client, m, file, onProgress) {
         count += chunk.length;
       },
     };
-    await client.downloadMedia(m, { outputFile: writer, progressCallback: onProgress });
+    if (fast) {
+      const size = mediaSize(m);
+      for await (const chunk of client.iterDownload({
+        file: m.media,
+        fileSize: bigInt(size),
+        requestSize: 512 * 1024,
+        chunkSize: 512 * 1024,
+      })) {
+        if (count + chunk.length > size) throw new Error('Download exceeds document size');
+        await writer.write(chunk);
+        onProgress(count, size);
+      }
+    } else {
+      await client.downloadMedia(m, { outputFile: writer, progressCallback: onProgress });
+    }
   } finally {
     await handle.close();
   }
   return count;
 }
 
-async function downloadOne(client, m, j) {
+async function downloadOne(client, m, j, unrestricted = false) {
   const size = mediaSize(m);
   if (size > MAX_FILE_MB * 1024 * 1024) {
     throw new Error(`File exceeds ${MAX_FILE_MB} MiB limit (${Math.round(size / 1024 / 1024)} MiB)`);
   }
 
-  const useInmem = size > 0 && size <= INMEM_THRESHOLD;
+  const fast = FAST_UNRESTRICTED && unrestricted && !m.noforwards &&
+    !!m.media?.document && Number.isSafeInteger(size) && size >= 1024 * 1024 &&
+    typeof client.iterDownload === 'function';
+  // Large unrestricted documents go directly to a validated disk file,
+  // avoiding a second copy into an upload backing file.
+  const useInmem = !fast && size > 0 && size <= INMEM_THRESHOLD;
   const name = fileNameOf(m);
   const started = Date.now();
 
@@ -230,6 +250,7 @@ async function downloadOne(client, m, j) {
       total: total || size,
       speed,
       note: `↓ ${name}`,
+      ...(fast ? { requestKiB: 512 } : { requestKiB: null }),
     };
     if (!j._lastProg || now - j._lastProg > 800) {
       j._lastProg = now;
@@ -277,7 +298,7 @@ async function downloadOne(client, m, j) {
       }
     }
     const written = await withFloodRetry(
-      () => writeMediaFile(client, m, file, onProgress),
+      () => writeMediaFile(client, m, file, onProgress, fast),
       j,
       'download'
     );
@@ -430,7 +451,7 @@ async function runForward(j, session) {
         if (j.status !== 'running') break;
         if (m.noforwards || src.noforwards) throw e;
         if (!m.media?.document && !m.media?.photo) throw e;
-        const item = await downloadOne(c, m, j);
+        const item = await downloadOne(c, m, j, !src.noforwards && !m.noforwards);
         try {
           await uploadOne(c, dst, item, j);
           j.uploaded++;
@@ -501,7 +522,7 @@ async function runReupload(j, session) {
       return { textOnly: true, caption: m.message || '', entities: m.entities || [], msgId: m.id };
     }
     try {
-      return await downloadOne(c, m, j);
+      return await downloadOne(c, m, j, !src.noforwards && !m.noforwards);
     } catch (e) {
       const f = e?.transferFailure;
       const retryable = f?.stage === 'download-validation' &&
@@ -509,7 +530,7 @@ async function runReupload(j, session) {
       if (src.noforwards || m.noforwards || !retryable || j.status !== 'running') throw e;
       await sleep(1500);
       if (j.status !== 'running') throw new Error('Job paused or cancelled');
-      return downloadOne(c, m, j);
+      return downloadOne(c, m, j, false); // one unrestricted retry uses the standard downloader
     }
   }
 
@@ -637,6 +658,7 @@ module.exports = function register(app, auth) {
         maxFileMb: MAX_FILE_MB,
         forwardBatch: FORWARD_BATCH,
         dlWorkers: null, // not exposed by GramJS downloadMedia
+        unrestrictedFast: FAST_UNRESTRICTED,
         ulWorkers: UL_WORKERS,
       },
     });
