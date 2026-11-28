@@ -26,7 +26,7 @@ const PARALLEL_FILES = Math.max(1, Math.min(16, Math.floor(Number(process.env.CL
 const INMEM_THRESHOLD = Math.max(1, Number(process.env.CLONE_INMEM_MB || 200)) * 1024 * 1024;
 const MAX_FILE_MB = Math.max(1, Number(process.env.CLONE_MAX_FILE_MB || 2048));
 const FORWARD_BATCH = Math.max(1, Number(process.env.CLONE_FORWARD_BATCH || 50));
-const DL_WORKERS = Math.max(1, Number(process.env.CLONE_DL_WORKERS || 8));
+// downloadMedia in GramJS 2.26.x does not accept a workers option.
 const UL_WORKERS = Math.max(1, Number(process.env.CLONE_UL_WORKERS || 8));
 const FLOOD_BASE_MS = Math.max(500, Number(process.env.CLONE_FLOOD_BASE_MS || 1500));
 
@@ -142,7 +142,8 @@ async function withFloodRetry(fn, j, label = 'op') {
       const err = errorText(e);
       const waitMatch = err.match(/FLOOD_WAIT[_OF_]*\s*(\d+)/i) || err.match(/wait of (\d+)/i);
       if (waitMatch) {
-        const sec = Math.min(120, Number(waitMatch[1]) || 5);
+        const sec = Number(waitMatch[1]) || 5;
+        if (sec > 120) throw e; // pause rather than retry before Telegram permits
         const ms = sec * 1000 + FLOOD_BASE_MS;
         j.progress = { ...(j.progress || {}), floodWait: sec, note: `Flood wait ${sec}s (${label})` };
         save(j);
@@ -177,6 +178,32 @@ function downloadValidationError(m, expected, actual, storage, reason) {
   return e;
 }
 
+// GramJS accepts a writer whose write() result is awaited. Own the file
+// descriptor ourselves so validation never races buffered stream writes.
+async function writeMediaFile(client, m, file, onProgress) {
+  const handle = await fs.promises.open(file, 'w', 0o600);
+  let count = 0;
+  try {
+    const writer = {
+      async write(chunk) {
+        if (!Buffer.isBuffer(chunk)) throw new Error('Invalid downloaded chunk');
+        if (count + chunk.length > MAX_FILE_MB * 1024 * 1024) throw new Error('File exceeds configured size limit');
+        let offset = 0;
+        while (offset < chunk.length) {
+          const result = await handle.write(chunk, offset, chunk.length - offset, count + offset);
+          if (!result.bytesWritten) throw new Error('Zero-byte disk write');
+          offset += result.bytesWritten;
+        }
+        count += chunk.length;
+      },
+    };
+    await client.downloadMedia(m, { outputFile: writer, progressCallback: onProgress });
+  } finally {
+    await handle.close();
+  }
+  return count;
+}
+
 async function downloadOne(client, m, j) {
   const size = mediaSize(m);
   if (size > MAX_FILE_MB * 1024 * 1024) {
@@ -189,6 +216,7 @@ async function downloadOne(client, m, j) {
 
   const record = trackProgress(j, 'download');
   const onProgress = (received, total) => {
+    if (j.status !== 'running') throw new Error('Job paused or cancelled');
     received = record(received);
     total = Number(total) || size;
     const now = Date.now();
@@ -213,7 +241,6 @@ async function downloadOne(client, m, j) {
     const buf = await withFloodRetry(
       () =>
         client.downloadMedia(m, {
-          workers: DL_WORKERS,
           progressCallback: onProgress,
         }),
       j,
@@ -240,7 +267,7 @@ async function downloadOne(client, m, j) {
   }
 
   const dir = fs.mkdtempSync(path.join(root, 'xfer-'));
-  const file = path.join(dir, name);
+  const file = path.join(dir, 'payload');
   try {
     if (fs.statfsSync) {
       const s = fs.statfsSync(root);
@@ -249,13 +276,8 @@ async function downloadOne(client, m, j) {
         throw new Error('Insufficient disk space for download');
       }
     }
-    await withFloodRetry(
-      () =>
-        client.downloadMedia(m, {
-          outputFile: file,
-          workers: DL_WORKERS,
-          progressCallback: onProgress,
-        }),
+    const written = await withFloodRetry(
+      () => writeMediaFile(client, m, file, onProgress),
       j,
       'download'
     );
@@ -267,6 +289,7 @@ async function downloadOne(client, m, j) {
     }
     if (!st.isFile()) throw downloadValidationError(m, size, st.size, 'disk', 'not a regular file');
     if (!st.size) throw downloadValidationError(m, size, 0, 'disk', 'empty file');
+    if (st.size !== written) throw downloadValidationError(m, written, st.size, 'disk', 'writer byte count mismatch');
     if (m.media?.document && size > 0 && st.size !== size) {
       throw downloadValidationError(m, size, st.size, 'disk', 'document size mismatch');
     }
@@ -477,7 +500,17 @@ async function runReupload(j, session) {
     if (!m.media?.document && !m.media?.photo) {
       return { textOnly: true, caption: m.message || '', entities: m.entities || [], msgId: m.id };
     }
-    return downloadOne(c, m, j);
+    try {
+      return await downloadOne(c, m, j);
+    } catch (e) {
+      const f = e?.transferFailure;
+      const retryable = f?.stage === 'download-validation' &&
+        f.actualBytes != null && f.expectedBytes != null && f.actualBytes < f.expectedBytes;
+      if (src.noforwards || m.noforwards || !retryable || j.status !== 'running') throw e;
+      await sleep(1500);
+      if (j.status !== 'running') throw new Error('Job paused or cancelled');
+      return downloadOne(c, m, j);
+    }
   }
 
   function enqueue(m) {
@@ -512,6 +545,7 @@ async function runReupload(j, session) {
         j.inflight = [];
       }
       j.cursor = item.msgId;
+      j._lastProg = Date.now();
       save(j);
     } finally {
       cleanupItem(item);
@@ -553,6 +587,7 @@ async function run(j, session) {
   j.progress = { phase: 'start', note: 'Starting…' };
   j.metrics = null;
   rateWindows.set(j, { start: Date.now(), download: 0, upload: 0 });
+  j._lastProg = Date.now();
   save(j);
 
   try {
@@ -592,13 +627,16 @@ module.exports = function register(app, auth) {
 
   app.get('/api/clone/jobs', auth, (req, res) => {
     res.json({
-      jobs: [...jobs.values()].filter((j) => j.owner === owner(req)),
+      jobs: [...jobs.values()].filter((j) => j.owner === owner(req)).map(j => ({
+        ...j,
+        progressAgeSec: j.status === 'running' && j._lastProg ? Math.max(0, Math.floor((Date.now() - j._lastProg) / 1000)) : null,
+      })),
       limits: {
         parallel: PARALLEL_FILES,
         inmemMb: Math.round(INMEM_THRESHOLD / 1024 / 1024),
         maxFileMb: MAX_FILE_MB,
         forwardBatch: FORWARD_BATCH,
-        dlWorkers: DL_WORKERS,
+        dlWorkers: null, // not exposed by GramJS downloadMedia
         ulWorkers: UL_WORKERS,
       },
     });
