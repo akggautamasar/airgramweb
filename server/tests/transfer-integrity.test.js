@@ -94,3 +94,42 @@ test('upload failure pauses without committing uncertain delivery', async t => {
   assert.deepEqual(j.inflight, [1]);
   assert.deepEqual(fs.readdirSync(root), ['job.json']);
 });
+
+test('unrestricted fast path uses larger chunks and retains final partial chunk', async t => {
+  const { downloadOne, root } = fixture(t);
+  const data = Buffer.alloc(1024 * 1024 + 7, 19);
+  const msg = media(20, data.length);
+  const client = {
+    async *iterDownload(options) {
+      assert.equal(options.requestSize, 512 * 1024);
+      assert.equal(options.chunkSize, 512 * 1024);
+      for (let i = 0; i < data.length; i += options.requestSize) {
+        yield data.subarray(i, i + options.requestSize);
+      }
+    },
+    async downloadMedia() { throw new Error('unexpected standard downloader'); },
+  };
+  const result = await downloadOne(client, msg, { status: 'running', id: 'fast-test' }, true);
+  assert.equal(result.kind, 'path');
+  assert.equal(result.size, data.length);
+  assert.deepEqual(fs.readFileSync(result.path), data);
+});
+
+test('fast path is excluded for restricted messages and sources', async t => {
+  const { downloadOne } = fixture(t);
+  const data = Buffer.alloc(1024 * 1024 + 7, 21);
+  let calls = 0;
+  const client = {
+    async *iterDownload() { throw new Error('fast path must not run'); },
+    async downloadMedia(m, options) {
+      calls++;
+      await options.outputFile.write(data);
+    },
+  };
+  const j = { status: 'running', id: 'restricted-test' };
+  const a = await downloadOne(client, { ...media(21, data.length), noforwards: true }, j, true);
+  const b = await downloadOne(client, media(22, data.length), j, false);
+  assert.equal(a.size, data.length);
+  assert.equal(b.size, data.length);
+  assert.equal(calls, 2);
+});
