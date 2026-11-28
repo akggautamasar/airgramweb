@@ -158,6 +158,25 @@ async function withFloodRetry(fn, j, label = 'op') {
   }
 }
 
+// Validation diagnostics are intentionally read-only: a mismatch still pauses the job.
+function downloadValidationError(m, expected, actual, storage, reason) {
+  const failure = {
+    stage: 'download-validation',
+    msgId: m.id,
+    expectedBytes: Number.isFinite(expected) && expected > 0 ? expected : null,
+    actualBytes: Number.isFinite(actual) ? actual : null,
+    storage,
+    reason,
+  };
+  const e = new Error(
+    'Download validation failed (message ' + failure.msgId + ', ' + storage +
+    '): ' + reason + '; expected ' + (failure.expectedBytes ?? 'unknown') +
+    ' bytes, actual ' + (failure.actualBytes ?? 'unknown') + ' bytes'
+  );
+  e.transferFailure = failure;
+  return e;
+}
+
 async function downloadOne(client, m, j) {
   const size = mediaSize(m);
   if (size > MAX_FILE_MB * 1024 * 1024) {
@@ -200,9 +219,14 @@ async function downloadOne(client, m, j) {
       j,
       'download'
     );
-    if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('Invalid or empty download buffer');
+    if (!Buffer.isBuffer(buf)) {
+      throw downloadValidationError(m, size, null, 'memory', 'result is not a Buffer');
+    }
     const buffer = buf;
-    if (m.media?.document && size > 0 && buffer.length !== size) throw new Error('Incomplete document download');
+    if (!buffer.length) throw downloadValidationError(m, size, 0, 'memory', 'empty buffer');
+    if (m.media?.document && size > 0 && buffer.length !== size) {
+      throw downloadValidationError(m, size, buffer.length, 'memory', 'document size mismatch');
+    }
     return {
       kind: 'buffer',
       buffer,
@@ -235,8 +259,17 @@ async function downloadOne(client, m, j) {
       j,
       'download'
     );
-    const st = fs.statSync(file);
-    if (!st.isFile() || !st.size || (m.media?.document && size > 0 && st.size !== size)) throw new Error('Invalid or incomplete downloaded file');
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch (e) {
+      throw downloadValidationError(m, size, null, 'disk', 'stat failed: ' + (e.code || 'unknown'));
+    }
+    if (!st.isFile()) throw downloadValidationError(m, size, st.size, 'disk', 'not a regular file');
+    if (!st.size) throw downloadValidationError(m, size, 0, 'disk', 'empty file');
+    if (m.media?.document && size > 0 && st.size !== size) {
+      throw downloadValidationError(m, size, st.size, 'disk', 'document size mismatch');
+    }
     return {
       kind: 'path',
       path: file,
@@ -448,12 +481,16 @@ async function runReupload(j, session) {
   }
 
   function enqueue(m) {
-    pending.push(prepare(m).then(item => ({ item }), error => ({ error })));
+    pending.push(prepare(m).then(item => ({ item }), error => ({ error, msgId: m.id })));
   }
 
   async function consume() {
     const result = await pending.shift();
-    if (result.error) throw result.error;
+    if (result.error) {
+      const e = result.error instanceof Error ? result.error : new Error(errorText(result.error));
+      if (!e.transferFailure) e.transferFailure = { stage: 'prepare', msgId: result.msgId };
+      throw e;
+    }
     const item = result.item;
     try {
       if (j.status !== 'running') throw new Error('Job paused or cancelled');
@@ -512,6 +549,7 @@ async function run(j, session) {
   running.add(j.id);
   j.status = 'running';
   j.error = '';
+  j.failure = null;
   j.progress = { phase: 'start', note: 'Starting…' };
   j.metrics = null;
   rateWindows.set(j, { start: Date.now(), download: 0, upload: 0 });
@@ -525,6 +563,13 @@ async function run(j, session) {
     }
   } catch (e) {
     j.error = errorText(e);
+    if (e?.transferFailure) {
+      j.failure = e.transferFailure;
+    } else if (j.inflight?.length) {
+      j.failure = { stage: 'send', msgIds: [...j.inflight] };
+    }
+    // Do not log captions, file paths, account data or session credentials.
+    if (j.failure) console.warn('[clone] transfer stopped', JSON.stringify(j.failure));
     if (j.inflight?.length && /FLOOD_WAIT|CHAT_WRITE_FORBIDDEN|CHAT_FORWARDS_RESTRICTED/.test(j.error)) {
       // keep checkpoint
     }
