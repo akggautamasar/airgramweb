@@ -126,7 +126,7 @@ export default function CloneView({ chats, selectedChat, onClose }) {
 
         {limits && (
           <p style={{ fontSize: 12, opacity: 0.7 }}>
-            Engine: {limits.parallel} parallel DL · {limits.dlWorkers}/{limits.ulWorkers} workers ·
+            Engine: up to {limits.parallel} pending files · {limits.ulWorkers} upload workers ·
             in-mem ≤{limits.inmemMb}MB · max {limits.maxFileMb}MB
           </p>
         )}
@@ -308,6 +308,11 @@ export default function CloneView({ chats, selectedChat, onClose }) {
                       ? `↓ ${fmtSpeed(j.metrics.downloadBps)} · ↑ ${fmtSpeed(j.metrics.uploadBps)}`
                       : 'No recent sample'}
                   </p>
+                  {j.progressAgeSec >= 60 && (
+                    <p style={{ margin: '4px 0', color: '#fbbf24' }}>
+                      No progress update for {j.progressAgeSec}s. The operation may be waiting.
+                    </p>
+                  )}
                 </div>
               )}
               {j.error && (
